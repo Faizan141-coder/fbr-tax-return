@@ -49,6 +49,27 @@ def test_unknown_layout_raises_with_guidance():
         detect_layout(b"a,b\n1,2\n", _set(MEEZAN, MCB), "csv")
 
 
+def test_unreadable_file_is_reported_distinctly_from_unknown_layout():
+    # Fix round 1: xlsx-magic bytes that are not a valid zip at all (a
+    # corrupt or partially-downloaded file) must not be reported the same
+    # way as a file that reads fine but matches no profile - "run fbr-dump
+    # and send a masked sample" is the wrong advice when the bytes are
+    # simply unreadable.
+    garbage = b"PK\x03\x04" + b"not actually a zip file" * 5
+    with pytest.raises(LayoutUnknown, match="could not be read") as exc_info:
+        detect_layout(garbage, _set(MEEZAN, MCB), "xlsx")
+    assert "fbr-dump" not in str(exc_info.value)
+
+
+def test_unknown_layout_message_is_not_the_unreadable_file_message():
+    # The reverse of the case above: a well-formed file that simply matches
+    # no profile must keep the original guidance, so the two messages can
+    # never silently collapse into one.
+    with pytest.raises(LayoutUnknown, match="fbr-dump") as exc_info:
+        detect_layout(b"a,b\n1,2\n", _set(MEEZAN, MCB), "csv")
+    assert "could not be read" not in str(exc_info.value)
+
+
 def test_two_matching_profiles_raise_rather_than_guess():
     # Review Focus #3: picking one silently would attach a wrong layout.
     twin = MEEZAN.model_copy(update={"id": "meezan.csv.v2"})

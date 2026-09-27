@@ -66,8 +66,27 @@ def usable_profiles(
 def _head_text(data: bytes, container: str, rows: int = 30) -> str:
     try:
         parsed = read_rows(data, container)
-    except ParseError:
-        return ""
+    except Exception as exc:  # noqa: BLE001 - see comment below
+        # A corrupt or partially-downloaded file must not crash detection: a
+        # later task feeds this function every one of the owner's real files
+        # in turn and reports a per-file outcome, so one bad file has to
+        # become a clear result here rather than an unhandled traceback that
+        # takes the whole run down. `ParseError` is this module's own signal
+        # for an undecodable CSV, but the xlsx path runs the bytes through
+        # openpyxl and zipfile, which raise their own exception types
+        # depending on exactly how the archive is damaged (confirmed by
+        # hand: `zipfile.BadZipFile` for garbage or a truncated archive,
+        # `KeyError` for a well-formed zip missing its xlsx parts) - and
+        # further corruption patterns could raise others we have not seen
+        # yet. This is a bytes-are-unreadable failure, not an
+        # unrecognised-layout one, so it must not be reported as the latter:
+        # telling the owner to run fbr-dump and send a masked sample would
+        # be the wrong advice for a file that is simply damaged.
+        raise LayoutUnknown(
+            f"this file could not be read as a {container} file ({exc}); it "
+            "may be corrupt or only partially downloaded - try "
+            "re-downloading it."
+        ) from exc
     return "\n".join(",".join(r) for r in parsed[:rows])
 
 
