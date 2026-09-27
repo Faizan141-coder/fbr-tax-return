@@ -5,6 +5,7 @@ import pytest
 from fbr.config.loader import run_selftest
 from fbr.config.schema_profile import Profile
 from fbr.engines.tabular import ParseError, parse_row, parse_tabular
+from fbr.model import make_txn_id
 from tests.fixtures.synth import (
     SynthTxn,
     build_statement,
@@ -232,9 +233,70 @@ def test_identical_rows_get_distinct_ids():
         rows=[SynthTxn(date(2025, 7, 2), "TOPUP", 100000, None),
               SynthTxn(date(2025, 7, 2), "TOPUP", 100000, None)],
     )
-    # Balances differ here, so also check the no-balance case via parse_row ids.
+    # NOTE: the running balance differs between these two rows, so it is the
+    # balance - not the occurrence tie-break - that separates their ids here.
+    # The genuinely tied case is covered by the test below.
     res = _parse(write_meezan_csv(stmt), MEEZAN)
     assert len({t.txn_id for t in res.transactions}) == 2
+
+
+# A wallet layout: no balance column, so balance_after is None on every row
+# and two identical same-day rows tie on every id component but occurrence.
+NO_BALANCE_COLUMN = MEEZAN.model_copy(update={
+    "id": "meezan.csv.nb.v1",
+    "balance": MEEZAN.balance.model_copy(update={"semantics": "none"}),
+})
+
+
+def test_two_identical_same_day_rows_with_no_balance_still_get_distinct_ids():
+    # The occurrence tie-break is the ONLY thing standing between two genuine
+    # Rs 1,000 top-ups on one day and a single shared txn_id (spec §4.1), and
+    # nothing exercised it: every existing case had a running balance, which
+    # separates the two rows on its own. Two genuine same-day top-ups on an
+    # account with no balance column tie on account, date, amount, balance
+    # (None) and description, so only `occurrence` can tell them apart. A
+    # shared id would collapse two real transactions into one - understating
+    # income - and would attach one review decision to both.
+    stmt = build_statement(
+        opening=0,
+        rows=[SynthTxn(date(2025, 7, 2), "TOPUP", 100000, None),
+              SynthTxn(date(2025, 7, 2), "TOPUP", 100000, None)],
+    )
+    res = _parse(write_meezan_csv(stmt), NO_BALANCE_COLUMN, account_id="wallet")
+
+    assert len(res.transactions) == 2
+    first, second = res.transactions
+    # Every other component really is identical - otherwise this test would
+    # pass for the wrong reason, exactly as the one above does.
+    assert first.balance_after is None and second.balance_after is None
+    assert (first.account_id, first.date, first.amount, first.description) == (
+        second.account_id, second.date, second.amount, second.description
+    )
+    assert first.txn_id != second.txn_id
+
+    # And the ids are the ones occurrence 1 and 2 produce, not merely different.
+    assert first.txn_id == make_txn_id("wallet", date(2025, 7, 2), 100000,
+                                       None, "TOPUP", 1)
+    assert second.txn_id == make_txn_id("wallet", date(2025, 7, 2), 100000,
+                                        None, "TOPUP", 2)
+
+
+def test_the_occurrence_tie_break_is_stable_across_reloads():
+    # Re-loading the same file must give the same ids, or a review decision
+    # saved last week stops attaching to its row (spec §4.1).
+    stmt = build_statement(
+        opening=0,
+        rows=[SynthTxn(date(2025, 7, 2), "TOPUP", 100000, None),
+              SynthTxn(date(2025, 7, 2), "TOPUP", 100000, None),
+              SynthTxn(date(2025, 7, 2), "TOPUP", 100000, None)],
+    )
+    data = write_meezan_csv(stmt)
+    first_run = _parse(data, NO_BALANCE_COLUMN, account_id="wallet")
+    second_run = _parse(data, NO_BALANCE_COLUMN, account_id="wallet")
+
+    ids = [t.txn_id for t in first_run.transactions]
+    assert len(set(ids)) == 3
+    assert ids == [t.txn_id for t in second_run.transactions]
 
 
 def test_missing_header_raises_with_a_useful_message():
