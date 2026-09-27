@@ -256,7 +256,18 @@ def corrupt(data: bytes, how: str) -> bytes:
             r[d], r[c] = r[c], r[d]
         else:
             a = hdr.index("Amount")
-            r[a] = r[a].replace("Dr", "Cr") if "Dr" in r[a] else r[a].replace("Cr", "Dr")
+            cell = r[a]
+            if "Dr" in cell:
+                r[a] = cell.replace("Dr", "Cr")
+            elif "Cr" in cell:
+                r[a] = cell.replace("Cr", "Dr")
+            elif cell[:1] == "+":
+                # Signed layouts (NayaPay: "+Rs. 500.00") carry the sign as
+                # the leading character, ahead of any Rs./PKR prefix, rather
+                # than a Dr/Cr suffix - flip that instead.
+                r[a] = "-" + cell[1:]
+            elif cell[:1] == "-":
+                r[a] = "+" + cell[1:]
     elif how == "wrong_total":
         for r in rows[:header_i]:
             if r and r[0] in ("CLOSING BALANCE", "Closing Balance", "Total Income"):
@@ -277,4 +288,19 @@ def corrupt(data: bytes, how: str) -> bytes:
             rows[header_i + 1], rows[header_i + 2] = rows[header_i + 2], rows[header_i + 1]
     else:
         raise ValueError(f"unknown corruption {how!r}")
-    return _csv_bytes(rows)
+
+    result = _csv_bytes(rows)
+    if result == data:
+        # A mode that quietly hands back the clean bytes is worse than one
+        # that fails: later tasks assert corrupt(...) != clean to prove
+        # their reconciliation checks actually fire, and a silent no-op
+        # here would look exactly like a passing test. Fail loudly instead,
+        # naming the mode and why it could not apply to this fixture.
+        if how == "unsorted_dates":
+            reason = "needs at least two transaction rows to swap"
+        elif how == "flip_sign":
+            reason = "found no Debit/Credit pair, Dr/Cr token, or leading +/- sign to flip"
+        else:
+            reason = "produced no change to this fixture"
+        raise ValueError(f"corrupt(): mode {how!r} could not be applied ({reason})")
+    return result
