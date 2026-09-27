@@ -49,6 +49,17 @@ closing      = '(?i)CLOSING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VE
 # but nothing checked them against the parsed totals until now.
 total_credit = '(?i)Total\s+Credit[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'      # VERIFY
 total_debit  = '(?i)Total\s+Debit[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'       # VERIFY
+# Final fix round, Finding 3: without these two, summary.period_start/end are
+# always None, so date_range is a permanent warn and Document.period_start/end
+# fall back to the first and last PRINTED transaction - which makes a clean
+# full-year statement report a gap over the days between 1 July and its own
+# first transaction, and the account "incomplete". The gap warning is the
+# signal for genuinely missing data; firing it always trains the owner to
+# ignore it. period_to re-matches the first date and takes the SECOND one on
+# the same line, because both ends of the period are printed together
+# ("Statement Period,01 Jul 2025 to 30 Jun 2026").
+period_from  = '(?i)STATEMENT\s+PERIOD[^\d\n]+?(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})'   # VERIFY
+period_to    = '(?i)STATEMENT\s+PERIOD[^\d\n]+?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[^\d\n]+?(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})'   # VERIFY
 
 [balance]
 semantics = "running"

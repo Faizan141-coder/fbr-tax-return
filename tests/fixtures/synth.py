@@ -151,13 +151,25 @@ def write_mcb_csv(stmt: SynthStatement) -> bytes:
     Total Credit/Total Debit rows below, which are equally unconfirmed, for
     symmetry between the two writers. The corresponding profile patterns
     are marked VERIFY like every other guessed label.
+
+    Final fix round, Finding 3: adds a Statement Period row, same additive
+    style and same reason. Without one, mcb.csv.v1 can define no
+    period_from/period_to, summary.period_start/end stay None, the
+    date_range check is a permanent warn, and Document.period_start/end fall
+    back to the first and last PRINTED transaction - which makes a clean
+    full-year statement report a gap over the days between 1 July and its
+    own first transaction. The gap warning is the signal for genuinely
+    missing data; firing it always trains the owner to ignore it.
     """
+    period = (f"{stmt.period_start.strftime('%d %b %Y')} to "
+              f"{stmt.period_end.strftime('%d %b %Y')}")
     rows: list[list[str]] = [
         ["Account Number", stmt.account_id],
         ["Opening Balance", format_paisa(stmt.opening)],
         ["Closing Balance", format_paisa(stmt.closing)],
         ["Total Credit", format_paisa(stmt.total_credit)],
         ["Total Debit", format_paisa(stmt.total_debit)],
+        ["Statement Period", period],
         ["Date", "Description", "Reference Number", "Amount", "Balance"],
     ]
     for i, t in enumerate(stmt.txns, start=1):
@@ -183,13 +195,21 @@ def write_nayapay_csv(stmt: SynthStatement) -> bytes:
     balance - silently shrinking the transaction count on an ordinary
     overdrawn statement. The balance now carries its sign the same way the
     amount already does; a non-negative balance renders exactly as before.
+
+    Final fix round, Finding 3: adds a Statement Period row, for the same
+    reason as write_mcb_csv above - without one, nayapay.csv.v1 can define
+    no period_from/period_to and every account it feeds is permanently
+    reported incomplete with a gap it does not actually have.
     """
+    period = (f"{stmt.period_start.strftime('%d %b %Y')} to "
+              f"{stmt.period_end.strftime('%d %b %Y')}")
     rows: list[list[str]] = [
         ["Account", stmt.account_id],
         ["Opening Balance", format_paisa(stmt.opening)],
         ["Closing Balance", format_paisa(stmt.closing)],
         ["Total Income", format_paisa(stmt.total_credit)],
         ["Total Spent", format_paisa(stmt.total_debit)],
+        ["Statement Period", period],
         ["Date", "Time", "Type", "Description", "Amount", "Balance"],
     ]
     for t in stmt.txns:

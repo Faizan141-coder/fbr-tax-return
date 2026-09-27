@@ -1,13 +1,15 @@
 from datetime import date
+from pathlib import Path
 
 import pytest
 
-from fbr.config.loader import ProfileSet, ProfileStatus, load_tax_year
+from fbr.config.loader import ProfileSet, ProfileStatus, load_profiles, load_tax_year
 from fbr.model import Account, Owner, Registry
 from fbr.pipeline import InputFile, load_files, read_statement_dir
 from tests.fixtures.synth import SynthTxn, build_statement, corrupt, write_meezan_csv, write_mcb_csv
 from tests.test_loader import TAXYEAR_TOML
-from tests.test_tabular import MCB, MEEZAN
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -33,28 +35,37 @@ def registry():
     )
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def profiles():
-    return ProfileSet(
-        (MEEZAN, MCB),
-        tuple(ProfileStatus(p.id, f"{p.id}.toml", True, "loaded") for p in (MEEZAN, MCB)),
-    )
+    """The profiles that actually SHIP, not a hand-built stand-in.
+
+    Final fix round, Finding 3: this fixture used to build a ProfileSet from
+    tests/test_tabular.py's MEEZAN/MCB, which carry period_from/period_to
+    patterns the shipped profiles did not. Every end-to-end test therefore
+    exercised configuration no owner ever runs, and CI stayed green while a
+    clean full-year statement reported `account_status = incomplete` with a
+    false gap warning against the real profiles/ directory. The hand-built
+    profiles remain in test_tabular.py for the unit tests that need to vary
+    one setting at a time.
+    """
+    return load_profiles(ROOT / "profiles")
 
 
 # Fix round 1: isolating one account's `anchor` from another's `prior_year`
 # needs an account whose ledger the anchor can actually move. A running-
-# balance account (MEEZAN, MCB as loaded above) ignores `anchor` entirely
+# balance account (the shipped meezan/mcb profiles) ignores `anchor` entirely
 # (reconcile.boundary_balances only consults it when there is no balance
 # column), so proving the anchor landed - and only landed - on its own
 # account needs a no-balance-column variant, same as
 # tests/test_reconcile_account.py's NO_BALANCE_PROFILE. This is scoped to
 # its own local ProfileSet in that one test, not the shared `profiles`
-# fixture, because it shares MEEZAN's [detect] signature and would make any
-# meezan-shaped file match two profiles at once (LayoutAmbiguous) if both
-# were loaded together.
-NO_BALANCE_MEEZAN = MEEZAN.model_copy(update={
-    "balance": MEEZAN.balance.model_copy(update={"semantics": "none"})
-})
+# fixture, because it shares the shipped meezan [detect] signature and would
+# make any meezan-shaped file match two profiles at once (LayoutAmbiguous)
+# if both were loaded together.
+def _no_balance(profile):
+    return profile.model_copy(update={
+        "balance": profile.balance.model_copy(update={"semantics": "none"})
+    })
 
 
 def _full_year(account_id="PK00TEST0000000000000000", seed=71):
@@ -159,7 +170,7 @@ def test_anchors_and_prior_year_reach_the_ledger(ty, registry, profiles):
     assert any(c.kind == "prior_year_mismatch" for c in run.all_checks)
 
 
-def test_anchor_and_prior_year_do_not_cross_accounts(ty, registry):
+def test_anchor_and_prior_year_do_not_cross_accounts(ty, registry, profiles):
     # Fix round 1 (coordinator review): the single-account version above
     # cannot structurally rule out a value keyed to one account leaking onto
     # another's ledger. meezan-main here carries no balance column, so its
@@ -167,10 +178,10 @@ def test_anchor_and_prior_year_do_not_cross_accounts(ty, registry):
     # balance); mcb-main keeps its normal running balance, so
     # `prior_year_closing`'s mismatch check is the only thing that can fire
     # for it. Each input is supplied for one account only.
+    variants = (_no_balance(profiles.by_id("meezan.csv.v1")), profiles.by_id("mcb.csv.v1"))
     local_profiles = ProfileSet(
-        (NO_BALANCE_MEEZAN, MCB),
-        tuple(ProfileStatus(p.id, f"{p.id}.toml", True, "loaded")
-              for p in (NO_BALANCE_MEEZAN, MCB)),
+        variants,
+        tuple(ProfileStatus(p.id, f"{p.id}.toml", True, "loaded") for p in variants),
     )
     files = [
         InputFile("meezan.csv", write_meezan_csv(_full_year())),
@@ -205,6 +216,54 @@ def test_the_same_file_twice_is_deduplicated_by_hash(ty, registry, profiles):
                      registry=registry, profiles=profiles, tax_year=ty)
     assert len(run.ledgers["meezan-main"].transactions) == 2   # not 4
     assert any(o.status == "duplicate" for o in run.outcomes)
+
+
+# --- the gap warning must mean something (final fix round, Finding 3) -------
+
+
+def test_a_clean_full_year_statement_is_complete_with_no_false_gap(ty, registry, profiles):
+    # Against the SHIPPED profiles this reported `incomplete` with
+    # "no statement covers 2025-07-01..2025-07-31; 2026-05-02..2026-06-30" -
+    # periods the statement does in fact cover - because neither profile
+    # defined period_from/period_to, so Document.period_start/end fell back
+    # to the first and last printed transaction (1 Aug and 1 May).
+    run = load_files([InputFile("meezan.csv", write_meezan_csv(_full_year()))],
+                     registry=registry, profiles=profiles, tax_year=ty)
+    ledger = run.ledgers["meezan-main"]
+    assert run.account_status["meezan-main"] == "complete"
+
+    date_range = next(c for c in ledger.checks if c.kind == "date_range")
+    assert date_range.status == "pass", date_range.detail
+    assert date_range.expected == "2025-07-01..2026-06-30"
+
+    gap = next(c for c in ledger.checks if c.kind == "gap")
+    assert gap.status == "pass", gap.detail
+    assert not [c for c in run.all_checks if c.status == "warn"]
+
+
+def test_a_genuinely_missing_period_still_warns(ty, registry, profiles):
+    # The other half: the check has to keep firing when data really is
+    # missing, or silencing the false positive would have silenced the
+    # signal too. Jul-Dec only, so Jan-Jun is a real hole.
+    half = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2025, 12, 31),
+        rows=[SynthTxn(date(2025, 8, 1), "Top-up", 50000, None)],
+        account_id="PK00TEST0000000000000000",
+    )
+    run = load_files([InputFile("meezan.csv", write_meezan_csv(half))],
+                     registry=registry, profiles=profiles, tax_year=ty)
+    assert run.account_status["meezan-main"] == "incomplete"
+    gap = next(c for c in run.ledgers["meezan-main"].checks if c.kind == "gap")
+    assert gap.status == "warn"
+    assert gap.actual == "2026-01-01..2026-06-30"
+
+
+def test_every_shipped_profile_bounds_its_own_dates(ty, registry, profiles):
+    # date_range must be live for every shipped layout, not just Meezan: a
+    # profile with no period patterns silently degrades to a permanent warn.
+    for profile in profiles.profiles:
+        assert profile.summary.period_from, f"{profile.id} defines no period_from"
+        assert profile.summary.period_to, f"{profile.id} defines no period_to"
 
 
 def test_read_statement_dir_returns_files(tmp_path, monkeypatch):

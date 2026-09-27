@@ -46,6 +46,16 @@ opening      = '(?i)Opening\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VE
 closing      = '(?i)Closing\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VERIFY it exists
 total_credit = '(?i)Total\s+Income[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'      # VERIFY
 total_debit  = '(?i)Total\s+Spent[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'       # VERIFY
+# Final fix round, Finding 3: without these two, summary.period_start/end are
+# always None, so date_range is a permanent warn and Document.period_start/end
+# fall back to the first and last PRINTED transaction - which makes a clean
+# full-year statement report a gap it does not have, and the account
+# "incomplete". The synthetic writer now prints a "Statement Period" row,
+# same additive style as the Total Income/Total Spent rows above and equally
+# unconfirmed against a real export. period_to re-matches the first date and
+# takes the SECOND one on the same line.
+period_from  = '(?i)STATEMENT\s+PERIOD[^\d\n]+?(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})'   # VERIFY
+period_to    = '(?i)STATEMENT\s+PERIOD[^\d\n]+?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[^\d\n]+?(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})'   # VERIFY
 
 [balance]
 semantics = "running"
