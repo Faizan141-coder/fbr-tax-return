@@ -27,6 +27,37 @@ def test_gitignore_excludes_statement_file_types():
         assert pattern in text
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "statement.csv",
+        "tests/fixtures/statement.csv",
+        "tests/fixtures/statement.xlsx",
+        "tests/fixtures/statement.pdf",
+        "tests/fixtures/__pycache__/synth.cpython-314.pyc",
+    ],
+)
+def test_no_statement_file_is_committable_anywhere(relative):
+    # `!tests/fixtures/**` used to un-ignore that whole directory, so a real
+    # .csv dropped there - or its __pycache__, which is how this surfaced -
+    # was committable. `git check-ignore` is asked rather than the file read,
+    # so the rule is tested as git applies it.
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", relative],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"{relative} is NOT ignored"
+
+
+def test_the_fixture_generator_itself_stays_tracked():
+    # Narrowing the negation must not make the fixtures module disappear.
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "tests/fixtures/synth.py"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, "tests/fixtures/synth.py must not be ignored"
+
+
 def _init_repo_with_active_hook(tmp_path):
     """A throwaway git repo with core.hooksPath pointed at this repo's real
     .githooks directory, so the tests below exercise the actual hook script

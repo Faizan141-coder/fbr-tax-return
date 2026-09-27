@@ -6,12 +6,19 @@ __pycache__/
 tests/private/
 
 # Statement data must never enter the repo (spec §9.2).
-# Exception: tests/fixtures/** holds only generator OUTPUT, created at test time.
 *.pdf
 *.csv
 *.xlsx
 *.xls
-!tests/fixtures/**
+# No exception for tests/fixtures/. Spec §9.2 carves one out for synthetic
+# generator output, but nothing writes to that directory: tests/fixtures/
+# synth.py builds each statement in memory and hands the bytes straight to
+# the parser. The blanket `!tests/fixtures/**` that used to sit here bought
+# nothing and cost two things - it re-included tests/fixtures/__pycache__
+# (confirmed with `git check-ignore -v`), and it would have re-included a
+# real .csv dropped in that directory, which is the exact leak the patterns
+# above exist to stop. Restore a NARROW negation here if a generator ever
+# does write a file.
 
 # SDD scratch workspace (ledger, briefs, review packages)
 .superpowers/
