@@ -29,11 +29,35 @@ for account_id, ledger in run.ledgers.items():
         "closing 30 Jun": format_paisa(ledger.closing) if ledger.closing is not None else "unknown",
         "from ": ledger.closing_source,
     })
+
+# An expected account with no statement has no ledger, so it would otherwise
+# be absent from this table altogether - no row, no warning, and declared
+# wealth quietly understated.
+for account_id in run.missing_accounts:
+    account = registry.by_id(account_id) if registry else None
+    rows.append({
+        "": STATUS_ICON["missing"],
+        "account": account.institution if account else account_id,
+        "transactions": 0,
+        "opening 1 Jul": "no statement",
+        "from": "—",
+        "closing 30 Jun": "no statement",
+        "from ": "—",
+    })
+
 st.dataframe(rows, hide_index=True)
 st.caption(
     "A balance shown as **unknown** is never treated as zero. Enter the 1 July "
     "balance in manual inputs for accounts whose statements print no balance."
 )
+
+if run.missing_accounts:
+    st.warning(
+        f"{len(run.missing_accounts)} account(s) expect a statement but none was "
+        "loaded: " + ", ".join(run.missing_accounts) + ". Their balances and "
+        "transactions are missing from this run. Add the file, or set "
+        "`statement_expected = false` in accounts.toml if none is due."
+    )
 
 failed = [c for c in run.all_checks if c.status == "fail"]
 warned = [c for c in run.all_checks if c.status == "warn"]

@@ -56,6 +56,12 @@ class RunResult:
     account_status: dict[str, str] = field(default_factory=dict)
     all_checks: tuple[Check, ...] = ()
     unassigned: tuple[InputFile, ...] = ()
+    # Registry accounts with statement_expected = true that produced no
+    # ledger at all: the statement was forgotten, unreadable, or could not be
+    # assigned. They carry `account_status = "missing"` and a
+    # `statement_missing` check, because an account that simply vanishes from
+    # the Checks page understates declared wealth with nothing to notice.
+    missing_accounts: tuple[str, ...] = ()
 
 
 def read_statement_dir(tax_year_name: str) -> list[InputFile]:
@@ -199,10 +205,42 @@ def load_files(
         status[account_id] = ledger.status
         checks.extend(ledger.checks)
 
+    # An expected account that produced no ledger at all must be reported.
+    # `ledgers` is built only from accounts that produced a parse, so an
+    # account whose statement was forgotten, unreadable or unassigned showed
+    # no row and no warning anywhere - it simply was not there, which
+    # understates declared wealth in exactly the way nobody notices.
+    missing: list[str] = []
+    for account in registry.accounts:
+        if not account.statement_expected or account.id in ledgers:
+            continue
+        if account.closed_on and account.closed_on < tax_year.period_start:
+            continue      # closed before the year began; no statement is due
+        if account.opened_on and account.opened_on > tax_year.period_end:
+            continue      # not opened until after the year ended
+        missing.append(account.id)
+        status[account.id] = "missing"
+        checks.append(Check(
+            check_id="account:statement_missing",
+            scope="account",
+            kind="statement_missing",
+            status="warn",
+            expected=f"a {tax_year.name} statement for {account.id}",
+            actual="none loaded",
+            detail=(
+                f"{account.id} ({account.institution}) is marked "
+                "statement_expected in accounts.toml but no statement was "
+                "loaded for it. Its balances and transactions are missing "
+                "from this run entirely - add the file, or set "
+                "statement_expected = false if none is due."
+            ),
+        ))
+
     return RunResult(
         outcomes=tuple(outcomes),
         ledgers=ledgers,
         account_status=status,
         all_checks=tuple(checks),
         unassigned=tuple(unassigned),
+        missing_accounts=tuple(missing),
     )

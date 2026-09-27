@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from fbr.pipeline import RunResult
 
-STATUS_ICON = {"complete": "✅", "incomplete": "⚠️", "failed": "❌"}
+# "missing" is not one of reconcile.AccountStatus: it is the state of an
+# account that produced no ledger at all, so there is nothing to reconcile.
+# It still needs a row, or an expected account disappears from the Checks
+# page without a word (see pipeline.RunResult.missing_accounts).
+STATUS_ICON = {"complete": "✅", "incomplete": "⚠️", "failed": "❌", "missing": "⬜"}
 
 VERIFICATION_MARK = {
     "iris_verified": "✓",

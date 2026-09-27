@@ -27,7 +27,56 @@ def test_masking_never_shows_a_full_iban():
 
 
 def test_status_icons_cover_every_account_status():
-    assert set(STATUS_ICON) == {"complete", "incomplete", "failed"}
+    from typing import get_args
+
+    from fbr.reconcile import AccountStatus
+
+    # Every status an AccountLedger can carry, plus "missing" - an expected
+    # account that produced no ledger at all, which has nothing to reconcile
+    # but still needs a row on the Checks page (final fix round, Finding 5).
+    assert set(STATUS_ICON) == set(get_args(AccountStatus)) | {"missing"}
+    assert set(STATUS_ICON) == {"complete", "incomplete", "failed", "missing"}
+
+
+def test_every_status_the_pipeline_reports_has_an_icon():
+    # The Checks page indexes STATUS_ICON directly, so a status the pipeline
+    # can produce but the map does not hold is a KeyError in the owner's face.
+    from datetime import date
+    from pathlib import Path
+
+    from fbr.config.loader import load_profiles, load_tax_year
+    from fbr.model import Account, Owner, Registry
+    from fbr.pipeline import InputFile, load_files
+    from tests.fixtures.synth import SynthTxn, build_statement, write_meezan_csv
+
+    root = Path(__file__).resolve().parents[1]
+    registry = Registry(
+        owner=Owner(name="OWNER NAME"),
+        accounts=(
+            Account(id="meezan-main", institution="Meezan Bank Limited", kind="bank",
+                    iban="PK00TEST0000000000000000", account_number="", wallet_number="",
+                    title="T", type="Saving", ownership="Self", currency="PKR",
+                    statement_expected=True),
+            Account(id="mcb-main", institution="MCB Bank Limited", kind="bank",
+                    iban="PK00TEST1111111111111111", account_number="", wallet_number="",
+                    title="T", type="Current", ownership="Self", currency="PKR",
+                    statement_expected=True),
+        ),
+    )
+    stmt = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2025, 8, 1), "Top-up", 50000, None)],
+        account_id="PK00TEST0000000000000000",
+    )
+    run = load_files(
+        [InputFile("meezan.csv", write_meezan_csv(stmt))],
+        registry=registry,
+        profiles=load_profiles(root / "profiles"),
+        tax_year=load_tax_year("TY2026", root / "taxyears"),
+    )
+    assert set(run.account_status.values()) == {"complete", "missing"}
+    for status in run.account_status.values():
+        assert status in STATUS_ICON
 
 
 def test_verification_marks_cover_every_state():

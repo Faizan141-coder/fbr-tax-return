@@ -140,7 +140,10 @@ def test_an_invalid_account_override_is_reported_not_silently_dropped(ty, regist
     assert "does-not-exist" in run.outcomes[0].message
     assert run.unassigned and run.unassigned[0].name == "x.csv"
     assert run.ledgers == {}
-    assert run.account_status == {}
+    # No account acquired figures from this file. Both registry accounts are
+    # now reported as still awaiting a statement (final fix round, Finding 5)
+    # rather than being absent from the run with nothing said about them.
+    assert run.account_status == {"meezan-main": "missing", "mcb-main": "missing"}
 
 
 def test_a_failed_statement_marks_the_account_failed_and_contributes_nothing(ty, registry, profiles):
@@ -238,7 +241,9 @@ def test_a_clean_full_year_statement_is_complete_with_no_false_gap(ty, registry,
 
     gap = next(c for c in ledger.checks if c.kind == "gap")
     assert gap.status == "pass", gap.detail
-    assert not [c for c in run.all_checks if c.status == "warn"]
+    # Nothing about this account warns. (mcb-main is separately and correctly
+    # reported as still awaiting its own statement.)
+    assert not [c for c in ledger.checks if c.status == "warn"]
 
 
 def test_a_genuinely_missing_period_still_warns(ty, registry, profiles):
@@ -256,6 +261,85 @@ def test_a_genuinely_missing_period_still_warns(ty, registry, profiles):
     gap = next(c for c in run.ledgers["meezan-main"].checks if c.kind == "gap")
     assert gap.status == "warn"
     assert gap.actual == "2026-01-01..2026-06-30"
+
+
+# --- an expected account must never vanish (final fix round, Finding 5) -----
+
+
+def test_an_expected_account_with_no_statement_is_reported(ty, registry, profiles):
+    # `ledgers` is built only from accounts that produced a parse, so
+    # mcb-main - statement_expected = true, statement simply not loaded -
+    # produced no row, no status and no check. Declared wealth silently
+    # understated by a whole account.
+    run = load_files([InputFile("meezan.csv", write_meezan_csv(_full_year()))],
+                     registry=registry, profiles=profiles, tax_year=ty)
+
+    assert set(run.ledgers) == {"meezan-main"}
+    assert run.missing_accounts == ("mcb-main",)
+    assert run.account_status["mcb-main"] == "missing"
+
+    warning = next(c for c in run.all_checks if c.kind == "statement_missing")
+    assert warning.status == "warn"
+    assert warning.scope == "account"
+    assert "mcb-main" in warning.detail
+    assert "MCB Bank Limited" in warning.detail
+
+
+def test_an_unassigned_statement_still_leaves_its_account_reported(ty, registry, profiles):
+    # The file was loaded but could not be attached to an account. Both
+    # halves must be visible: the file is unassigned AND the accounts that
+    # are still without one are named.
+    stmt = _full_year(account_id="PK00TEST9999999999999999")
+    run = load_files([InputFile("x.csv", write_meezan_csv(stmt))],
+                     registry=registry, profiles=profiles, tax_year=ty)
+    assert run.outcomes[0].status == "unassigned"
+    assert set(run.missing_accounts) == {"meezan-main", "mcb-main"}
+    assert {c.kind for c in run.all_checks if c.status == "warn"} == {"statement_missing"}
+
+
+def test_an_account_that_expects_no_statement_is_not_reported_missing(ty, profiles):
+    reg = Registry(
+        owner=Owner(name="OWNER NAME"),
+        accounts=(
+            Account(id="meezan-main", institution="Meezan Bank Limited", kind="bank",
+                    iban="PK00TEST0000000000000000", account_number="", wallet_number="",
+                    title="T", type="Saving", ownership="Self", currency="PKR",
+                    statement_expected=True),
+            # Spec §4.2: these exist only so transfers to them are recognised.
+            Account(id="payoneer", institution="Payoneer", kind="foreign", iban="",
+                    account_number="", wallet_number="", title="T", type="",
+                    ownership="Self", currency="USD", statement_expected=False),
+        ),
+    )
+    run = load_files([InputFile("meezan.csv", write_meezan_csv(_full_year()))],
+                     registry=reg, profiles=profiles, tax_year=ty)
+    assert run.missing_accounts == ()
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"closed_on": date(2025, 3, 31)},     # closed before the tax year began
+        {"opened_on": date(2026, 9, 1)},      # not opened until after it ended
+    ],
+)
+def test_an_account_outside_the_tax_year_is_not_reported_missing(ty, profiles, over):
+    reg = Registry(
+        owner=Owner(name="OWNER NAME"),
+        accounts=(
+            Account(id="meezan-main", institution="Meezan Bank Limited", kind="bank",
+                    iban="PK00TEST0000000000000000", account_number="", wallet_number="",
+                    title="T", type="Saving", ownership="Self", currency="PKR",
+                    statement_expected=True),
+            Account(id="old-account", institution="Old Bank", kind="bank",
+                    iban="PK00TEST2222222222222222", account_number="", wallet_number="",
+                    title="T", type="Saving", ownership="Self", currency="PKR",
+                    statement_expected=True, **over),
+        ),
+    )
+    run = load_files([InputFile("meezan.csv", write_meezan_csv(_full_year()))],
+                     registry=reg, profiles=profiles, tax_year=ty)
+    assert run.missing_accounts == ()
 
 
 def test_every_shipped_profile_bounds_its_own_dates(ty, registry, profiles):
