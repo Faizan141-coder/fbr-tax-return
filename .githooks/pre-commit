@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 # Block IBAN- and CNIC-shaped strings from entering the repo (spec §9.2).
 # PK00TEST is the reserved synthetic prefix and is allowed.
+#
+# Two things this hook has to get right, both of which it used to get wrong:
+#
+# 1. Statements PRINT these identifiers grouped, and a copy-paste carries the
+#    grouping. An IBAN printed in groups of four ("PK99 XXXX 9999 9999 9999
+#    9999" in fbr-dump's shape notation) and a CNIC printed with spaces in
+#    place of its hyphens both committed cleanly against the unspaced
+#    patterns - the printed form of the very thing this hook exists to stop.
+#    Blanks and hyphens are now removed before the IBAN match, and the CNIC
+#    pattern accepts either separator.
+#
+#    No real-shaped example appears anywhere in this file, by the same rule
+#    tests/test_guardrails.py follows: a literal one would make the hook
+#    itself uncommittable under the hook.
+#
+# 2. The exemption is per MATCH, not per line. Filtering whole lines with
+#    `grep -v PK00TEST` let a real IBAN through whenever a PK00TEST string
+#    happened to share its line - a fixture and a leaked value on one row of
+#    a table, say.
+#
+# Matches are counted, never echoed: printing the offending line would put a
+# real IBAN or CNIC on the terminal, which is the opposite of the point.
 set -uo pipefail
 
 staged=$(git diff --cached --name-only --diff-filter=ACM)
@@ -9,11 +31,25 @@ staged=$(git diff --cached --name-only --diff-filter=ACM)
 fail=0
 while IFS= read -r f; do
   [ -f "$f" ] || continue
-  if git show ":$f" | grep -nE 'PK[0-9]{2}[A-Z]{4}[0-9]{16}' | grep -v 'PK00TEST'; then
-    echo "pre-commit: IBAN-shaped string in $f" >&2; fail=1
+
+  # A Pakistani IBAN: PK, 2 check digits, 4 bank letters, 16 digits - however
+  # it happens to be grouped. -a so a binary blob is scanned as text rather
+  # than skipped with "Binary file matches".
+  ibans=$(git show ":$f" \
+            | tr -d '[:blank:]-' \
+            | grep -aoE 'PK[0-9]{2}[A-Z]{4}[0-9]{16}' \
+            | grep -v '^PK00TEST')
+  if [ -n "$ibans" ]; then
+    echo "pre-commit: IBAN-shaped string in $f ($(printf '%s\n' "$ibans" | wc -l | tr -d ' ') occurrence(s))" >&2
+    fail=1
   fi
-  if git show ":$f" | grep -nE '[0-9]{5}-[0-9]{7}-[0-9]'; then
-    echo "pre-commit: CNIC-shaped string in $f" >&2; fail=1
+
+  # A CNIC: 5 digits, 7 digits, 1 digit, hyphen- or space-separated. The
+  # hyphen is first inside each bracket so it is a literal, not a range.
+  cnics=$(git show ":$f" | grep -aoE '[0-9]{5}[- ][0-9]{7}[- ][0-9]')
+  if [ -n "$cnics" ]; then
+    echo "pre-commit: CNIC-shaped string in $f ($(printf '%s\n' "$cnics" | wc -l | tr -d ' ') occurrence(s))" >&2
+    fail=1
   fi
 done <<< "$staged"
 
