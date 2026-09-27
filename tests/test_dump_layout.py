@@ -76,6 +76,24 @@ def test_shipped_allowlist_loads_and_holds_banking_vocabulary():
         assert word in allow, word
 
 
+def test_allowlist_excludes_words_that_are_also_personal_names():
+    """Allowlist matching is case/punctuation-insensitive and whole-token, so
+    any shipped word that is *also* a real name fragment survives a dump
+    verbatim - a silent, permanent leak (STAN as a remitter's first name,
+    PEER as in "Peer Muhammad", a genuine Pakistani name/honorific). This
+    pins the class of problem, not just these two words: re-adding either
+    STAN or PEER to tools/dump_allowlist.txt must fail this test, and a
+    realistic name line must come out with nothing readable left.
+    """
+    allow = load_allowlist()
+    assert "STAN" not in allow
+    assert "PEER" not in allow
+
+    masked = mask_text("Received from PEER MUHAMMAD BAKHSH", allowlist=allow)
+    for fragment in ("PEER", "MUHAMMAD", "BAKHSH"):
+        assert fragment not in masked
+
+
 def test_extra_allowlist_file_is_merged(tmp_path):
     extra = tmp_path / "dump-allowlist.txt"
     extra.write_text("# a comment\nINTERBANK\n\nkuickpay\n")
