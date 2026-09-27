@@ -8,7 +8,6 @@ import streamlit as st
 from app.state import VERIFICATION_HELP, VERIFICATION_MARK, mask_identifier
 from fbr import paths
 from fbr.config.loader import ConfigError, load_profiles, load_registry, load_tax_year
-from fbr.engines.tabular import parse_row
 from fbr.ingest import usable_profiles
 
 st.header("Setup")

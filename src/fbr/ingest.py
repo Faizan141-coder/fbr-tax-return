@@ -34,8 +34,13 @@ def sha256_of(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def sniff_container(data: bytes, filename: str = "") -> str:
-    """Identify the container from the file's own bytes."""
+def sniff_container(data: bytes) -> str:
+    """Identify the container from the file's own bytes.
+
+    Takes no filename on purpose. It used to accept one, ignore it, and
+    invite the belief that the extension had a say - a bank that emails
+    XLSX bytes named .csv would then crash the CSV reader.
+    """
     if data.startswith(_PDF_MAGIC):
         return "pdf"
     if data.startswith(_XLSX_MAGIC):

@@ -1,3 +1,4 @@
+import inspect
 from datetime import date
 
 import pytest
@@ -27,15 +28,18 @@ def _set(*profiles: Profile) -> ProfileSet:
 
 def test_sniffs_csv_xlsx_and_pdf_from_bytes():
     stmt = build_statement(seed=21)
-    assert sniff_container(write_meezan_csv(stmt), "x.csv") == "csv"
-    assert sniff_container(write_xlsx(stmt), "x.xlsx") == "xlsx"
-    assert sniff_container(b"%PDF-1.7\n...", "x.pdf") == "pdf"
+    assert sniff_container(write_meezan_csv(stmt)) == "csv"
+    assert sniff_container(write_xlsx(stmt)) == "xlsx"
+    assert sniff_container(b"%PDF-1.7\n...") == "pdf"
 
 
-def test_sniffing_ignores_a_misleading_extension():
-    stmt = build_statement(seed=22)
+def test_sniffing_cannot_be_influenced_by_a_filename():
     # A bank emailing XLSX bytes named .csv must not crash the CSV reader.
-    assert sniff_container(write_xlsx(stmt), "statement.csv") == "xlsx"
+    # The function used to accept a filename and ignore it, which invited the
+    # belief that the extension had a say; it now takes bytes only, so the
+    # guarantee is in the signature rather than in a comment.
+    assert list(inspect.signature(sniff_container).parameters) == ["data"]
+    assert sniff_container(write_xlsx(build_statement(seed=22))) == "xlsx"
 
 
 def test_detects_the_matching_layout():

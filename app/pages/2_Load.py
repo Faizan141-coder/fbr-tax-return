@@ -21,18 +21,35 @@ if not (registry and profiles and ty_config):
     st.stop()
 
 folder = paths.statements_dir(tax_year)
-st.caption(
-    f"Reading from `{folder}`. Files are read straight from disk rather than "
-    "uploaded, because Streamlit writes uploads over 1 MB to a temporary file."
-)
 
 files: list[InputFile] = []
-source = st.radio("Source", ["Private folder", "Upload"], horizontal=True)
+source = st.radio(
+    "Source", ["Private folder", "Upload"], horizontal=True,
+    help=(
+        "Private folder reads the bytes straight from where you put them. "
+        "Upload hands them to Streamlit first, which writes any file over "
+        "1 MB to a temporary file of its own outside the private folder."
+    ),
+)
 
 if source == "Private folder":
+    st.caption(
+        f"Reading from `{folder}`. Nothing is copied: the bytes are read "
+        "straight from where you put them."
+    )
     files = read_statement_dir(tax_year)
     st.write(f"{len(files)} file(s) found.")
 else:
+    # Spec §8.1 keeps upload as the alternative to the private folder, but
+    # it is not free and the page must say so: Streamlit writes any upload
+    # over 1 MB to a temporary file in the OS temp directory, where a real
+    # statement then sits outside ~/fbr-private until the OS clears it.
+    st.caption(
+        "Streamlit writes any upload over 1 MB to a temporary file in your "
+        f"OS temp directory, outside `{folder}`. For real statements, prefer "
+        "**Private folder**; use Upload for a one-off file you have not "
+        "filed there yet."
+    )
     uploaded = st.file_uploader(
         "Statements", type=["csv", "xlsx"], accept_multiple_files=True
     )

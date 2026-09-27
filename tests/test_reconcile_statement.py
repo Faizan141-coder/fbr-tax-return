@@ -1,7 +1,7 @@
 from datetime import date
 
 from fbr.engines.tabular import parse_tabular
-from fbr.reconcile import check_statement, statement_usable, worst_status
+from fbr.reconcile import check_statement, statement_usable
 from tests.fixtures.synth import SynthTxn, build_statement, corrupt, write_meezan_csv
 from tests.test_tabular import MEEZAN
 
@@ -19,8 +19,9 @@ def _kinds(checks, status=None):
 def test_a_clean_statement_passes_every_check():
     _, checks = _checks(write_meezan_csv(build_statement(seed=31)))
     assert _kinds(checks, "fail") == set()
+    assert _kinds(checks, "warn") == set()
     assert statement_usable(checks) is True
-    assert worst_status(checks) == "pass"
+    assert all(c.status == "pass" for c in checks)
 
 
 def test_all_five_checks_are_reported():
@@ -138,8 +139,13 @@ def test_no_balance_column_skips_the_balance_checks_without_failing():
     assert "running_balance" not in _kinds(checks, "fail")
 
 
-def test_worst_status_prefers_fail_over_warn():
+def test_a_broken_statement_is_not_usable():
+    # Replaces test_worst_status_prefers_fail_over_warn: reconcile.worst_status
+    # had no production caller and only its own test exercised it, so it went
+    # with the rest of the dead code. statement_usable is the function the
+    # pipeline actually gates on, and this is the property that mattered.
     _, clean = _checks(write_meezan_csv(build_statement(seed=40)))
     _, broken = _checks(corrupt(write_meezan_csv(build_statement(seed=40)), "drop_row"))
-    assert worst_status(clean) in ("pass", "warn")
-    assert worst_status(broken) == "fail"
+    assert statement_usable(clean) is True
+    assert statement_usable(broken) is False
+    assert "running_balance" in _kinds(broken, "fail")

@@ -65,11 +65,17 @@ class RunResult:
 
 
 def read_statement_dir(tax_year_name: str) -> list[InputFile]:
-    """Read statements from the private folder rather than an upload.
+    """Read statements from the private folder. The Load page's default.
 
-    Preferred over Streamlit's uploader: Streamlit spools uploads over 1 MB
-    to a temporary file on disk, and these files are already on disk where
-    the owner put them.
+    Preferred over Streamlit's uploader, because Streamlit spools an upload
+    over 1 MB to a temporary file of its own - outside ~/fbr-private, in the
+    OS temp directory - and these files are already on disk where the owner
+    deliberately put them.
+
+    Spec §8.1 keeps upload as the alternative, so the Load page still offers
+    it; the page states that cost where the owner chooses. Either way the
+    bytes arrive here as an InputFile and nothing downstream can tell the
+    two apart.
     """
     folder = paths.statements_dir(tax_year_name)
     if not folder.is_dir():
@@ -115,7 +121,7 @@ def load_files(
             continue
         seen_hashes.add(digest)
 
-        container = sniff_container(item.data, item.name)
+        container = sniff_container(item.data)
         if container == "pdf":
             outcomes.append(FileOutcome(
                 item.name, digest, "unsupported", None, None,

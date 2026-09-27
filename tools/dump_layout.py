@@ -225,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     data = source.read_bytes()
-    container = sniff_container(data, source.name)
+    container = sniff_container(data)
     if container == "pdf":
         print(
             "fbr-dump: PDF dumping arrives in phase 2 with the PDF engine. "

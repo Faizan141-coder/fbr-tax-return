@@ -20,13 +20,6 @@ from fbr.engines.tabular import ParseResult
 from fbr.model import Account, Check, Transaction
 from fbr.money import format_paisa
 
-_ORDER = {"pass": 0, "warn": 1, "fail": 2}
-
-
-def worst_status(checks: tuple[Check, ...] | list[Check]) -> str:
-    return max((c.status for c in checks), key=lambda s: _ORDER[s], default="pass")
-
-
 def statement_usable(checks: tuple[Check, ...] | list[Check]) -> bool:
     """False when any check failed: the statement's figures must not be used."""
     return not any(c.status == "fail" for c in checks)
