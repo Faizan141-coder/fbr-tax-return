@@ -17,6 +17,7 @@ import argparse
 import csv
 import io
 import re
+import string
 import sys
 from collections import Counter
 from pathlib import Path
@@ -25,13 +26,42 @@ from fbr import paths
 from fbr.ingest import sha256_of, sniff_container
 
 _ALLOWLIST_FILE = Path(__file__).with_name("dump_allowlist.txt")
-# A comma continues a token only when it groups digits (e.g. "1,234.56"), not
-# between two words: "Date,Description" (a header row joined with no space,
-# as CSV commonly is) must split into "Date" and "Description" so each is
-# checked against the allowlist on its own, rather than merging into one
-# blob that matches no single allowlist entry and gets shape-mangled whole.
-_TOKEN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]|,(?=[0-9]))*")
-_STRIP = re.compile(r"[^A-Za-z0-9]")
+
+# A token is a run that starts with a letter or digit IN ANY SCRIPT and runs
+# on until ASCII whitespace or ASCII punctuation ends it. The four ASCII
+# punctuation marks that legitimately sit inside one word (. _ / -) do not
+# end it, and a comma continues it only when it groups digits (e.g.
+# "1,234.56"), never between two words: "Date,Description" (a header row
+# joined with no space, as CSV commonly is) must split into "Date" and
+# "Description" so each is checked against the allowlist on its own, rather
+# than merging into one blob that matches no single allowlist entry and gets
+# shape-mangled whole.
+#
+# This is deliberately "everything except the ASCII separators" rather than
+# an [A-Za-z0-9] allowlist of characters. An ASCII-only tokenizer never
+# CAPTURES non-Latin text, and what is never captured is never shaped:
+# "محمد فیضان حسنات" passed through a dump completely unchanged, and
+# "José Müller" came out as "Xxxé Xüxxxx" - the tokenizer stopped dead at
+# the first accented letter and left it, plus the rest of that word,
+# verbatim. A foreign remitter's name or any Urdu text in a real statement
+# would have reached a dump readable. Non-ASCII combining marks (Arabic
+# harakat, Devanagari matras, a decomposed acute accent) are inside the run
+# for the same reason: they must not split a word into fragments that are
+# then allowlist-checked one character at a time.
+#
+# The cost is that a non-ASCII character glued between two letters - an em
+# dash in "A—B" - joins the token and is shaped rather than kept as a
+# separator. Standing alone, as every separator in a real statement does, it
+# is not a token start and survives verbatim, so separator style is intact.
+_BREAKERS = "".join(c for c in string.punctuation if c not in "._/-")
+_TOKEN = re.compile(rf"[^\W_](?:[^\s{re.escape(_BREAKERS)}]|,(?=\d))*")
+# Also Unicode, and for the same reason: this is what folds a token before it
+# is looked up in the allowlist. Left as [^A-Za-z0-9] it would reduce "José"
+# to "JOS", so an allowlist entry "JOS" would release the whole token - name
+# and all - verbatim. Folding to "JOSÉ" keeps a foreign-script token from
+# being allowlisted by its ASCII skeleton. Pure-ASCII tokens fold exactly as
+# before.
+_STRIP = re.compile(r"[\W_]")
 _NUMERIC = re.compile(r"^[0-9][0-9,]*(\.[0-9]+)?$")
 # Built from chr(96) rather than written literally, so this source can live
 # inside a Markdown fence without closing it.
@@ -68,8 +98,21 @@ def shape(token: str, *, allowlist: set[str], hide_magnitude: bool = False) -> s
             out.append("X")
         elif ch.islower():
             out.append("x")
-        else:
+        elif ch.isascii():
+            # ASCII punctuation and separators are the layout signal a
+            # profile author needs (1,234.56 vs 1234.56, a glued "Dr"), so
+            # they survive. This is the ONLY thing that survives unshaped.
             out.append(ch)
+        else:
+            # Anything else non-ASCII: a caseless letter (Urdu, Arabic, CJK,
+            # Devanagari - `isupper()` and `islower()` are both False for
+            # every one of them, so the branches above never fire and the
+            # character used to be copied through verbatim), a combining
+            # accent, or an unfamiliar symbol. A name in the owner's own
+            # script is exactly what this tool exists to hide, so the rule
+            # is fail-closed: mask it. Caseless scripts have no upper form,
+            # so the lowercase placeholder is the case-appropriate one.
+            out.append("x")
     shaped = "".join(out)
 
     if hide_magnitude and any(c.isdigit() for c in token):

@@ -69,6 +69,101 @@ def test_no_real_name_survives_masking():
         assert fragment not in masked
 
 
+# --- the masking gate must not be ASCII-only ---------------------------------
+#
+# The tokenizer used to be [A-Za-z0-9](?:[A-Za-z0-9._/-]|,(?=[0-9]))*, so text
+# it never captured was never shaped. Verified before the fix:
+#   "محمد فیضان حسنات"  ->  unchanged, every character readable
+#   "José Müller"       ->  "Xxxé Xüxxxx"
+#   "Ünal Öztürk"       ->  "Üxxx Öxxüxx"
+# A foreign remitter's name or any Urdu text in a real statement reached the
+# dump verbatim - the exact leak this tool exists to prevent.
+
+URDU_NAME = "محمد فیضان حسنات"
+URDU_WITH_DIACRITICS = "مُحَمَّد اقبال"
+
+
+@pytest.mark.parametrize(
+    "text,readable",
+    [
+        (URDU_NAME, ("محمد", "فیضان", "حسنات", "م", "ح", "د")),
+        (URDU_WITH_DIACRITICS, ("مُحَمَّد", "اقبال", "ا", "ق", "ب")),
+        ("José Müller", ("José", "Müller", "Jos", "é", "ü", "Mü")),
+        ("Ünal Öztürk", ("Ünal", "Öztürk", "Ü", "Ö", "ü", "nal")),
+        ("Владимир Петров", ("Владимир", "Петров", "В", "П", "ир")),
+        ("Received from 张伟", ("张伟", "张", "伟")),
+        # Decomposed (NFD) accents: the accent is a separate code point that
+        # an ASCII tokenizer also walked straight past.
+        ("José Müller", ("Jose", "José", "́", "̈")),
+    ],
+)
+def test_no_non_ascii_name_survives_masking(text, readable):
+    masked = mask_text(text, allowlist=load_allowlist())
+    for fragment in readable:
+        assert fragment not in masked, f"{fragment!r} survived in {masked!r}"
+
+
+def test_a_mixed_script_line_leaves_only_shapes_and_banking_vocabulary():
+    # A realistic remittance narration: allowlisted banking words survive,
+    # and nothing of either name does.
+    masked = mask_text(
+        f"IBFT In from {URDU_NAME} / José Müller",
+        allowlist=load_allowlist(),
+    )
+    assert "IBFT" in masked          # the layout signal a profile author needs
+    for fragment in ("محمد", "فیضان", "حسنات", "José", "Müller", "Jos", "é"):
+        assert fragment not in masked, f"{fragment!r} survived in {masked!r}"
+
+
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        ("محمد", "xxxx"),            # caseless script -> lowercase placeholder
+        ("José", "Xxxx"),
+        ("Müller", "Xxxxxx"),
+        ("Öztürk", "Xxxxxx"),
+        ("张伟", "xx"),
+        ("Владимир", "Xxxxxxxx"),
+        ("٣٤٥", "999"),              # Arabic-Indic digits are still digits
+    ],
+)
+def test_shape_masks_non_ascii_letters_case_appropriately(token, expected):
+    assert shape(token, allowlist=set()) == expected
+
+
+def test_a_foreign_token_cannot_be_allowlisted_by_its_ascii_skeleton():
+    # Folding for the allowlist lookup is Unicode too. Were it still
+    # [^A-Za-z0-9], "José" would fold to "JOS" and an allowlist holding "JOS"
+    # would release the whole token - accent, name and all - verbatim.
+    assert shape("José", allowlist={"JOS"}) == "Xxxx"
+    assert shape("Müller", allowlist={"MLLER"}) == "Xxxxxx"
+
+
+def test_ascii_separators_still_survive_so_layout_stays_readable():
+    # The Unicode tokenizer must not cost a profile author the separator
+    # style, suffixes or column boundaries they are reading the dump for.
+    assert mask_text("1,234.56", allowlist=set()) == "9,999.99"
+    assert mask_text("1,234.00Dr", allowlist=set()) == "9,999.99Xx"
+    assert mask_text("Booking Date,Description,Credit", allowlist=ALLOW) == (
+        "Booking Date,Description,Credit"
+    )
+
+
+def test_a_non_ascii_statement_dumps_without_leaking_a_name(tmp_path, monkeypatch):
+    # End to end through the CLI, not just the masking helpers.
+    monkeypatch.setenv("FBR_PRIVATE_DIR", str(tmp_path / "priv"))
+    src = tmp_path / "statement.csv"
+    stmt = build_statement(
+        opening=0,
+        rows=[SynthTxn(date(2025, 7, 2), f"IBFT In from {URDU_NAME}", 50000, None)],
+    )
+    src.write_bytes(write_meezan_csv(stmt))
+    assert main([str(src)]) == 0
+    dump = next((tmp_path / "priv" / "dumps").glob("*.dump.md")).read_text()
+    for fragment in ("محمد", "فیضان", "حسنات"):
+        assert fragment not in dump, f"{fragment!r} reached the dump"
+
+
 def test_shipped_allowlist_loads_and_holds_banking_vocabulary():
     allow = load_allowlist()
     for word in ("DATE", "DESCRIPTION", "CREDIT", "DEBIT", "BALANCE", "IBFT",
