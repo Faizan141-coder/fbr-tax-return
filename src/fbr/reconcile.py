@@ -273,6 +273,60 @@ def _dedupe_overlaps(
     return kept, checks
 
 
+def _check_balance_continuity(results: list[ParseResult]) -> list[Check]:
+    """Spec §6.2: each statement's closing balance equals the next one's opening.
+
+    Only date gaps were checked before this, so two statements that met
+    perfectly in time but not in money merged silently: a Jul-Dec statement
+    closing at 150,000.00 followed by a Jan-Jun statement opening at
+    900,000.00 reconciled individually, showed no gap, and produced a
+    30 June closing balance 750,000.00 too high with nothing firing. That
+    figure is typed straight onto the wealth statement.
+
+    The check applies only to a pair whose periods MEET with no missing day.
+    Where they are separated by a gap the balance legitimately moved in
+    between and the gap check is the right report; where they overlap the
+    overlap check is. Ordering is by period, not by the order the files
+    happened to be read in.
+    """
+    ordered = sorted(
+        (r for r in results if r.document.period_start and r.document.period_end),
+        key=lambda r: (r.document.period_start, r.document.period_end),
+    )
+
+    checks: list[Check] = []
+    for earlier, later in zip(ordered, ordered[1:]):
+        if later.document.period_start != earlier.document.period_end + timedelta(days=1):
+            continue
+        closing = earlier.document.summary.closing
+        opening = later.document.summary.opening
+        seam = (f"{earlier.document.filename} -> {later.document.filename} "
+                f"at {later.document.period_start.isoformat()}")
+        if closing is None or opening is None:
+            checks.append(_check(
+                "continuity", "warn", "a printed closing and opening balance",
+                "not both printed",
+                f"{seam}: the statements meet with no missing day, but one of "
+                "them prints no balance at the seam; the chain is not verified",
+                scope="account",
+            ))
+            continue
+        status = "pass" if closing == opening else "fail"
+        detail = (
+            f"{seam}: the closing balance carried into the next statement"
+            if status == "pass" else
+            f"{seam}: one statement closes at {format_paisa(closing)} and the "
+            f"next opens at {format_paisa(opening)}, a difference of "
+            f"{format_paisa(opening - closing)}; a statement is missing, "
+            "truncated or belongs to another account"
+        )
+        checks.append(_check(
+            "continuity", status, format_paisa(closing), format_paisa(opening),
+            detail, scope="account",
+        ))
+    return checks
+
+
 def _check_continuity(
     results: list[ParseResult], account: Account, tax_year: TaxYear
 ) -> list[Check]:
@@ -407,6 +461,7 @@ def merge_account(
 
     merged, overlap_checks = _dedupe_overlaps(results)
     checks.extend(overlap_checks)
+    checks.extend(_check_balance_continuity(results))
     checks.extend(_check_continuity(results, account, tax_year))
 
     if any_failed or any(c.status == "fail" for c in checks):

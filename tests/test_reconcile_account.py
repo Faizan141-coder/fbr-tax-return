@@ -356,6 +356,99 @@ def test_mixed_profiles_recover_the_closing_when_the_late_half_has_no_balances(t
     assert led.status == "complete"
 
 
+# --- spec §6.2 continuity chain (final fix round, Finding 4) ----------------
+
+
+def test_a_break_in_the_balance_chain_between_statements_fails(ty):
+    # Only date gaps were checked. These two meet perfectly in time and each
+    # reconciles on its own, so nothing fired: the merged ledger reported
+    # closing 9,100.00 and status "complete" over a 7,500.00 discontinuity.
+    first = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2025, 12, 31),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )                                   # closes at 1,500.00
+    second = build_statement(
+        opening=900000, start=date(2026, 1, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2026, 2, 1), "B", 10000, None)],
+    )                                   # opens at 9,000.00
+    led = merge_account([_result(first), _result(second, sha="b" * 64)],
+                        _account(), ty, profiles=PROFILES)
+
+    assert "continuity" in _kinds(led, "fail")
+    broken = next(c for c in led.checks if c.kind == "continuity")
+    assert broken.expected == "1,500.00" and broken.actual == "9,000.00"
+    assert "7,500.00" in broken.detail
+    assert "gap" not in _kinds(led, "warn")      # the dates really are contiguous
+    # Fail closed: the account contributes nothing until the cause is fixed.
+    assert led.status == "failed"
+    assert led.transactions == ()
+
+
+def test_an_unbroken_balance_chain_passes(ty):
+    first = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2025, 12, 31),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )
+    second = build_statement(
+        opening=first.closing, start=date(2026, 1, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2026, 2, 1), "B", -20000, None)],
+    )
+    led = merge_account([_result(first), _result(second, sha="b" * 64)],
+                        _account(), ty, profiles=PROFILES)
+    assert "continuity" in _kinds(led, "pass")
+    assert led.status == "complete"
+
+
+def test_the_chain_is_ordered_by_period_not_by_file_order(ty):
+    # The same two statements handed over newest-first must produce the same
+    # verdict, or the check would depend on the order the owner's folder
+    # happened to list the files in.
+    first = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2025, 12, 31),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )
+    second = build_statement(
+        opening=first.closing, start=date(2026, 1, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2026, 2, 1), "B", -20000, None)],
+    )
+    led = merge_account([_result(second, sha="b" * 64), _result(first)],
+                        _account(), ty, profiles=PROFILES)
+    assert "continuity" in _kinds(led, "pass")
+    assert "continuity" not in _kinds(led, "fail")
+
+
+def test_a_gap_between_statements_does_not_also_fail_continuity(ty):
+    # With days missing between them, the balance legitimately moved in
+    # between. The gap warning is the right report; failing the balance
+    # chain as well would turn every incomplete account into a failed one.
+    first = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2025, 9, 30),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )
+    later = build_statement(
+        opening=999999, start=date(2026, 1, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2026, 2, 1), "B", -20000, None)],
+    )
+    led = merge_account([_result(first), _result(later, sha="b" * 64)],
+                        _account(), ty, profiles=PROFILES)
+    assert "gap" in _kinds(led, "warn")
+    assert "continuity" not in _kinds(led)
+    assert led.status == "incomplete"
+
+
+def test_overlapping_statements_do_not_also_fail_continuity(ty):
+    # Overlapping periods are the overlap check's business; their printed
+    # opening/closing pairs are not a chain and must not be read as one.
+    stmt = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )
+    led = merge_account([_result(stmt), _result(stmt, sha="b" * 64)],
+                        _account(), ty, profiles=PROFILES)
+    assert "continuity" not in _kinds(led)
+    assert led.status == "complete"
+
+
 def test_an_undeterminable_closing_balance_is_named_in_the_warning(ty):
     # Finding 3, the invariant behind both halves: when nothing - statement
     # or anchor - determines a boundary, the warning must say which boundary,
