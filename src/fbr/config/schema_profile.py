@@ -72,6 +72,27 @@ class Formats(BaseModel):
     credit_tokens: list[str] = Field(default_factory=list)
     decimals: int = 2
 
+    @field_validator("decimals")
+    @classmethod
+    def _only_two_decimals_can_be_honoured(cls, v: int) -> int:
+        # The knob is documented in spec §5.4 and was accepted at any value,
+        # but money.parse_paisa cannot honour anything but 2: PAISA_PER_RUPEE
+        # is 100 and the amount grammar caps the fraction at two digits, so a
+        # different value did not rescale, it corrupted - decimals = 3 turned
+        # "1.50" into 600 paisa (Rs 6.00) and decimals = 1 turned "1.5" into
+        # 105 paisa (Rs 1.05). Refuse the profile at load time, where the
+        # author can see it, rather than shipping a wrong figure.
+        if v != 2:
+            raise ValueError(
+                f"decimals = {v} cannot be honoured: money is integer paisa "
+                "throughout this codebase (1 rupee = 100 paisa) and the amount "
+                "grammar accepts at most two decimal places. Any other value "
+                "silently miscomputed every amount in the statement - "
+                "decimals = 3 read 1.50 as Rs 6.00. Remove the setting or set "
+                "it to 2."
+            )
+        return v
+
     @field_validator("dates")
     @classmethod
     def _formats_include_a_year(cls, v: list[str]) -> list[str]:

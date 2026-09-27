@@ -100,6 +100,27 @@ def test_invalid_regex_is_rejected_at_load_time():
         Profile.model_validate(bad)
 
 
+@pytest.mark.parametrize("value", [0, 1, 3, 4])
+def test_profile_rejects_a_decimals_it_cannot_honour(value):
+    # Final fix round, Finding 6: `decimals` was accepted at any value and
+    # then silently miscomputed every amount - decimals = 3 read "1.50" as
+    # 600 paisa (Rs 6.00), decimals = 1 read "1.5" as 105 paisa (Rs 1.05) -
+    # because PAISA_PER_RUPEE is 100 and the amount grammar caps the fraction
+    # at two digits. A profile author using the documented knob got a wrong
+    # figure with nothing raised anywhere. It must fail at load time instead.
+    bad = {**MINIMAL_PROFILE,
+           "formats": {**MINIMAL_PROFILE["formats"], "decimals": value}}
+    with pytest.raises(ValidationError, match="paisa"):
+        Profile.model_validate(bad)
+
+
+def test_profile_accepts_the_only_decimals_that_works():
+    ok = {**MINIMAL_PROFILE, "formats": {**MINIMAL_PROFILE["formats"], "decimals": 2}}
+    assert Profile.model_validate(ok).formats.decimals == 2
+    # ... and omitting it entirely still defaults to 2.
+    assert Profile.model_validate(MINIMAL_PROFILE).formats.decimals == 2
+
+
 def test_date_formats_must_include_a_year():
     # %d %b without %Y is deprecated in Python and would silently pick 1900.
     bad = {**MINIMAL_PROFILE, "formats": {"dates": ["%d %b"], "sign": "columns"}}

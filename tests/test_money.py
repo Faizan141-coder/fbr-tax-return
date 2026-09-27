@@ -1,6 +1,6 @@
 # tests/test_money.py
 import pytest
-from fbr.money import AmountError, format_paisa, parse_paisa
+from fbr.money import AmountError, UnsupportedDecimals, format_paisa, parse_paisa
 
 
 @pytest.mark.parametrize(
@@ -80,3 +80,38 @@ def test_formats_paisa(paisa, expected):
 def test_round_trips():
     for text in ("1,234.56", "0.01", "12,34,567.89"):
         assert parse_paisa(format_paisa(parse_paisa(text))) == parse_paisa(text)
+
+
+# --- formats.decimals must never silently rescale (final fix round, Finding 6)
+
+
+@pytest.mark.parametrize(
+    "text,decimals,what_it_used_to_return",
+    [
+        ("1.50", 3, 600),     # Rs 6.00 instead of Rs 1.50
+        ("1.5", 1, 105),      # Rs 1.05 instead of Rs 1.50
+        ("1.50", 0, 150),     # only right by accident; still unsupported
+        ("1.50", 4, 15000),
+    ],
+)
+def test_an_unsupported_decimals_is_rejected_not_miscomputed(
+    text, decimals, what_it_used_to_return
+):
+    # PAISA_PER_RUPEE is 100 and the grammar caps the fraction at two digits,
+    # so `decimals` never rescaled anything - it just corrupted the sum. A
+    # profile author using the documented knob got a wrong figure with no
+    # error anywhere.
+    with pytest.raises(UnsupportedDecimals, match="paisa"):
+        parse_paisa(text, decimals=decimals)
+
+
+def test_the_unsupported_decimals_error_is_not_mistaken_for_a_bad_amount():
+    # The engine turns AmountError (and ValueError) into an unresolved row,
+    # which would blame the statement for what is a configuration bug.
+    assert not issubclass(UnsupportedDecimals, AmountError)
+    assert not issubclass(UnsupportedDecimals, ValueError)
+
+
+def test_two_decimals_is_still_the_default_and_still_works():
+    assert parse_paisa("1.50") == 150
+    assert parse_paisa("1.50", decimals=2) == 150

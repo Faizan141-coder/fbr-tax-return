@@ -24,6 +24,16 @@ class AmountError(ValueError):
     """
 
 
+class UnsupportedDecimals(Exception):
+    """`decimals` is not 2, which this module cannot honour.
+
+    Deliberately NOT an AmountError, and deliberately not a ValueError: the
+    engine turns those into an unresolved row, which would blame the
+    statement for what is a configuration or programming bug. This must
+    surface as itself.
+    """
+
+
 # Groups are 2 or 3 digits to accept both 1,234,567 and lakh-style 12,34,567.
 _AMOUNT = re.compile(
     r"""(?x) ^
@@ -69,7 +79,22 @@ def parse_paisa(text: str, *, decimals: int = 2) -> int:
 
     Rejects Dr/Cr suffixes: direction is the layout profile's job, because
     only the profile knows which token that bank uses for which direction.
+
+    `decimals` must be 2. It is kept as a parameter because profiles pass
+    `formats.decimals` through, but any other value is rejected rather than
+    honoured: PAISA_PER_RUPEE is 100 and the grammar above caps the fraction
+    at two digits, so a different value did not change the scale, it
+    corrupted the arithmetic. parse_paisa("1.50", decimals=3) returned 600
+    (Rs 6.00) and parse_paisa("1.5", decimals=1) returned 105 (Rs 1.05) -
+    a profile author using the documented knob got a silently wrong figure.
     """
+    if decimals != 2:
+        raise UnsupportedDecimals(
+            f"decimals={decimals!r}: money is integer paisa throughout this "
+            "codebase (1 rupee = 100 paisa) and the amount grammar accepts at "
+            "most two decimal places, so no other value can be honoured. "
+            "Honouring it silently is how 1.50 became Rs 6.00."
+        )
     if text is None:
         raise AmountError("amount is None")
     s = _normalize(str(text))
