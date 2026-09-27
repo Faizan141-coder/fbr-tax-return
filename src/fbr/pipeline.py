@@ -1,0 +1,209 @@
+"""Wire ingest, parsing and reconciliation into one call.
+
+The Streamlit pages hold no business logic: they call load_files and render
+what comes back. That keeps every rule in this codebase testable without a
+browser, and keeps the UI from quietly acquiring a rule of its own.
+
+No file failure stops the run. Each file reports its own outcome, because a
+statement that cannot be read is information the owner needs, not a crash.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from fbr import paths
+from fbr.config.loader import ProfileSet
+from fbr.config.schema_taxyear import TaxYear
+from fbr.engines.tabular import ParseError, ParseResult, parse_tabular, read_rows
+from fbr.ingest import (
+    LayoutAmbiguous,
+    LayoutUnknown,
+    detect_layout,
+    resolve_account,
+    sha256_of,
+    sniff_container,
+)
+from fbr.model import Check, Registry
+from fbr.reconcile import AccountLedger, merge_account
+
+_STATEMENT_SUFFIXES = {".csv", ".xlsx", ".xls", ".pdf"}
+
+
+@dataclass(frozen=True, slots=True)
+class InputFile:
+    name: str
+    data: bytes
+    account_id: str | None = None      # set by the owner when detection fails
+
+
+@dataclass(frozen=True, slots=True)
+class FileOutcome:
+    name: str
+    sha256: str
+    status: str            # ok | unknown_layout | ambiguous_layout | unassigned
+                           # | unreadable | duplicate | unsupported
+    layout_id: str | None
+    account_id: str | None
+    message: str
+    transactions_parsed: int
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    outcomes: tuple[FileOutcome, ...]
+    ledgers: dict[str, AccountLedger] = field(default_factory=dict)
+    account_status: dict[str, str] = field(default_factory=dict)
+    all_checks: tuple[Check, ...] = ()
+    unassigned: tuple[InputFile, ...] = ()
+
+
+def read_statement_dir(tax_year_name: str) -> list[InputFile]:
+    """Read statements from the private folder rather than an upload.
+
+    Preferred over Streamlit's uploader: Streamlit spools uploads over 1 MB
+    to a temporary file on disk, and these files are already on disk where
+    the owner put them.
+    """
+    folder = paths.statements_dir(tax_year_name)
+    if not folder.is_dir():
+        return []
+    return [
+        InputFile(p.name, p.read_bytes())
+        for p in sorted(folder.iterdir())
+        if p.is_file() and p.suffix.lower() in _STATEMENT_SUFFIXES
+    ]
+
+
+def _free_text(data: bytes, container: str) -> str:
+    try:
+        return "\n".join(",".join(r) for r in read_rows(data, container)[:30])
+    except ParseError:
+        return ""
+
+
+def load_files(
+    files: list[InputFile],
+    *,
+    registry: Registry,
+    profiles: ProfileSet,
+    tax_year: TaxYear,
+    anchors: dict[str, int] | None = None,
+    prior_year: dict[str, int] | None = None,
+) -> RunResult:
+    """Parse and reconcile a set of statement files."""
+    outcomes: list[FileOutcome] = []
+    unassigned: list[InputFile] = []
+    by_account: dict[str, list[ParseResult]] = {}
+    used_profiles: dict[str, object] = {}
+    seen_hashes: set[str] = set()
+
+    for item in files:
+        digest = sha256_of(item.data)
+
+        if digest in seen_hashes:
+            outcomes.append(FileOutcome(
+                item.name, digest, "duplicate", None, None,
+                "identical to a file already loaded; ignored", 0,
+            ))
+            continue
+        seen_hashes.add(digest)
+
+        container = sniff_container(item.data, item.name)
+        if container == "pdf":
+            outcomes.append(FileOutcome(
+                item.name, digest, "unsupported", None, None,
+                "PDF statements arrive in phase 2; export CSV or XLSX for now", 0,
+            ))
+            continue
+
+        try:
+            profile = detect_layout(item.data, profiles, container)
+        except LayoutUnknown as exc:
+            outcomes.append(FileOutcome(
+                item.name, digest, "unknown_layout", None, None, str(exc), 0))
+            continue
+        except LayoutAmbiguous as exc:
+            outcomes.append(FileOutcome(
+                item.name, digest, "ambiguous_layout", None, None, str(exc), 0))
+            continue
+
+        account_id = item.account_id
+        if account_id is not None and registry.by_id(account_id) is None:
+            # An explicit override the owner picked (or a caller supplied)
+            # that names no account in the registry must not be silently
+            # treated as valid: parse_tabular would happily attach the
+            # transactions to that id, report "ok", and merge_account's
+            # `registry.by_id(account_id) is None` guard would then drop the
+            # whole account with no outcome ever telling the owner why their
+            # figures went missing. Route it through the same manual-
+            # assignment path as an unresolved account instead.
+            unassigned.append(item)
+            outcomes.append(FileOutcome(
+                item.name, digest, "unassigned", profile.id, None,
+                f"{account_id!r} is not a known registry account id; "
+                "choose one on the Load page", 0,
+            ))
+            continue
+
+        if account_id is None:
+            try:
+                probe = parse_tabular(item.data, profile, sha256=digest,
+                                      filename=item.name, account_id=None)
+            except ParseError as exc:
+                outcomes.append(FileOutcome(
+                    item.name, digest, "unreadable", profile.id, None, str(exc), 0))
+                continue
+            account_id = resolve_account(
+                probe.document.summary, _free_text(item.data, container), registry
+            )
+
+        if account_id is None:
+            unassigned.append(item)
+            outcomes.append(FileOutcome(
+                item.name, digest, "unassigned", profile.id, None,
+                "no registry account matches this statement; choose one on the Load page", 0,
+            ))
+            continue
+
+        try:
+            result = parse_tabular(item.data, profile, sha256=digest,
+                                   filename=item.name, account_id=account_id)
+        except ParseError as exc:
+            outcomes.append(FileOutcome(
+                item.name, digest, "unreadable", profile.id, account_id, str(exc), 0))
+            continue
+
+        by_account.setdefault(account_id, []).append(result)
+        used_profiles[profile.id] = profile
+        outcomes.append(FileOutcome(
+            item.name, digest, "ok", profile.id, account_id,
+            f"parsed {len(result.transactions)} transaction(s)", len(result.transactions),
+        ))
+
+    ledgers: dict[str, AccountLedger] = {}
+    status: dict[str, str] = {}
+    checks: list[Check] = []
+
+    for account_id, results in by_account.items():
+        account = registry.by_id(account_id)
+        if account is None:      # pragma: no cover - guarded above; every id here is valid
+            continue
+        ledger = merge_account(
+            results, account, tax_year,
+            profiles=used_profiles,  # type: ignore[arg-type]
+            anchor=(anchors or {}).get(account_id),
+            prior_year_closing=(prior_year or {}).get(account_id),
+        )
+        ledgers[account_id] = ledger
+        status[account_id] = ledger.status
+        checks.extend(ledger.checks)
+
+    return RunResult(
+        outcomes=tuple(outcomes),
+        ledgers=ledgers,
+        account_status=status,
+        all_checks=tuple(checks),
+        unassigned=tuple(unassigned),
+    )
