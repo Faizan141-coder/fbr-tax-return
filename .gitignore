@@ -12,3 +12,6 @@ tests/private/
 *.xlsx
 *.xls
 !tests/fixtures/**
+
+# SDD scratch workspace (ledger, briefs, review packages)
+.superpowers/
