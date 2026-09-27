@@ -10,9 +10,14 @@ A statement with any failing check contributes nothing to any total
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import date, timedelta
+from typing import Literal
+
 from fbr.config.schema_profile import Profile
+from fbr.config.schema_taxyear import TaxYear
 from fbr.engines.tabular import ParseResult
-from fbr.model import Check
+from fbr.model import Account, Check, Transaction
 from fbr.money import format_paisa
 
 _ORDER = {"pass": 0, "warn": 1, "fail": 2}
@@ -163,15 +168,7 @@ def check_statement(result: ParseResult, profile: Profile) -> tuple[Check, ...]:
     return tuple(c for c in checks if c is not None)
 
 
-# --- appended to src/fbr/reconcile.py ---------------------------------------
-"""Account-level merge and tax-year boundary balances (spec §6.2-6.4)."""
-
-from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import Literal
-
-from fbr.config.schema_taxyear import TaxYear
-from fbr.model import Account, Transaction
+# --- Account-level merge and tax-year boundary balances (spec §6.2-6.4) -----
 
 BalanceSource = Literal["printed", "computed", "anchor", "unknown"]
 AccountStatus = Literal["complete", "incomplete", "failed"]
@@ -206,9 +203,14 @@ def _dedupe_overlaps(
     """Resolve overlapping statements by PERIOD, never row by row.
 
     Two identical Rs 1,000 top-ups on one day are both real, so rows are
-    never matched across the year. Instead, where two statements cover the
-    same days, the overlapping window must tell the same story; if it does,
-    one copy is kept, preferring CSV/XLSX over PDF and then the longer period.
+    never matched across the year. Instead, where two statements' periods
+    intersect at all - fully, as when a duplicate download repeats the same
+    period, or partially, as when a Jul-Dec statement and a Nov-Jun statement
+    both print November - the intersecting window must tell the same story.
+    Only the intersecting slice is resolved: the rest of a partially
+    overlapping statement is genuine, uncovered data and must survive, or a
+    real February transaction would be discarded along with a duplicated
+    November one.
     """
     checks: list[Check] = []
     ordered = sorted(
@@ -226,33 +228,45 @@ def _dedupe_overlaps(
     for result in ordered:
         start = result.document.period_start
         end = result.document.period_end
-        window = next(
-            ((s, e) for s, e in covered if start and end and s <= start and end <= e), None
-        )
-        if window is not None:
-            # Fully inside an already-accepted period: the stories must agree.
-            existing = [t for t in kept if start <= t.date <= end]
-            incoming = list(result.transactions)
-            if [_row_key(t) for t in existing] != [_row_key(t) for t in incoming]:
-                checks.append(
-                    _check(
-                        "overlap", "fail",
-                        f"{len(existing)} row(s) for {start}..{end}",
-                        f"{len(incoming)} row(s) from {result.document.filename}",
-                        "two statements cover the same period but disagree; "
-                        "re-download one of them",
-                        scope="account",
-                    )
-                )
-            else:
-                checks.append(
-                    _check("overlap", "pass", "identical", "identical",
-                           f"{result.document.filename} duplicates {start}..{end}; "
-                           "one copy kept", scope="account")
-                )
-            continue
+        incoming = list(result.transactions)
 
-        kept.extend(result.transactions)
+        if start and end:
+            for s, e in covered:
+                lo, hi = max(s, start), min(e, end)
+                if lo > hi:
+                    continue  # these two periods do not actually intersect
+
+                incoming_window = [t for t in incoming if lo <= t.date <= hi]
+                if not incoming_window:
+                    # Nothing left here to reconcile - either this statement
+                    # never had rows in this slice, or an earlier covered
+                    # period already claimed and removed them.
+                    continue
+
+                existing_window = [t for t in kept if lo <= t.date <= hi]
+                if [_row_key(t) for t in existing_window] != [_row_key(t) for t in incoming_window]:
+                    checks.append(
+                        _check(
+                            "overlap", "fail",
+                            f"{len(existing_window)} row(s) for {lo}..{hi}",
+                            f"{len(incoming_window)} row(s) from {result.document.filename}",
+                            "two statements cover overlapping days but disagree; "
+                            "re-download one of them",
+                            scope="account",
+                        )
+                    )
+                else:
+                    checks.append(
+                        _check("overlap", "pass", "identical", "identical",
+                               f"{result.document.filename} duplicates {lo}..{hi}; "
+                               "one copy kept", scope="account")
+                    )
+                # Either way, the intersecting slice is resolved: agreeing
+                # rows are already kept from the earlier statement, and
+                # disagreeing ones must not be added again from this one.
+                incoming = [t for t in incoming if not (lo <= t.date <= hi)]
+
+        kept.extend(incoming)
         if start and end:
             covered.append((start, end))
 
@@ -311,6 +325,7 @@ def boundary_balances(
     ends_on_last_day: bool,
     anchor: int | None,
     has_balance_column: bool,
+    tax_year: TaxYear,
 ) -> tuple[int | None, BalanceSource, int | None, BalanceSource]:
     """Resolve the 1 July and 30 June balances (spec §6.3)."""
     if has_balance_column:
@@ -319,20 +334,39 @@ def boundary_balances(
             opening = (first.balance_after - first.amount
                        if first.balance_after is not None else None)
             closing = last.balance_after
+            opening_source: BalanceSource = "unknown" if opening is None else (
+                "printed" if starts_on_first_day and printed_opening is not None else "computed"
+            )
+            closing_source: BalanceSource = "unknown" if closing is None else (
+                "printed" if ends_on_last_day and printed_closing is not None else "computed"
+            )
+        elif all_txns:
+            # Dormant IN THE TAX YEAR, but the statement recorded activity
+            # outside it (fix round 1, Finding 1). The printed opening/
+            # closing belong to the STATEMENT's own period, not the tax
+            # year's, and copying them verbatim silently swallows whatever
+            # happened between the statement's boundary and the tax year's:
+            # a transaction dated before the tax year starts has already
+            # moved the balance by 1 July, and a transaction dated after
+            # 30 June has not moved it yet, so neither printed figure is the
+            # tax-year boundary. Derive it instead: nothing moves the
+            # balance DURING a dormant tax year, so the figure that held at
+            # the last pre-year transaction (if any) holds all the way
+            # through to 30 June too; with no pre-year transaction at all,
+            # nothing has happened yet by either boundary, so the
+            # statement's own printed opening - which predates every
+            # transaction it holds - was true throughout.
+            before = [t for t in all_txns if t.date < tax_year.period_start]
+            value = before[-1].balance_after if before else printed_opening
+            opening = closing = value
+            opening_source = closing_source = "unknown" if value is None else "computed"
         else:
-            # Dormant in-year: fall back to the printed figures (Review Focus #5).
+            # Genuinely dormant: no transactions at all, in or out of the
+            # tax year. Fall back to the printed figures (Review Focus #5).
             opening = printed_opening
             closing = printed_closing if printed_closing is not None else printed_opening
-
-        opening_source: BalanceSource = "unknown" if opening is None else (
-            "printed" if starts_on_first_day and printed_opening is not None else "computed"
-        )
-        closing_source: BalanceSource = "unknown" if closing is None else (
-            "printed" if ends_on_last_day and printed_closing is not None else "computed"
-        )
-        if not in_year and opening is not None:
-            opening_source = "printed"
-            closing_source = "printed"
+            opening_source = "unknown" if opening is None else "printed"
+            closing_source = "unknown" if closing is None else "printed"
         return opening, opening_source, closing, closing_source
 
     # No balance column (SadaPay): everything hangs off the owner's anchor.
@@ -411,14 +445,44 @@ def merge_account(
         all_txns, in_year,
         printed_opening=printed_opening, printed_closing=printed_closing,
         starts_on_first_day=starts_first, ends_on_last_day=ends_last,
-        anchor=anchor, has_balance_column=has_balance,
+        anchor=anchor, has_balance_column=has_balance, tax_year=tax_year,
     )
 
-    if opening_source == "unknown":
+    # A statement layout can change mid-year (fix round 1, Finding 3): one
+    # statement running-balance, another not. `has_balance` is True for the
+    # account as soon as ANY statement is running-balance, so the branch
+    # above derives opening/closing from `in_year[0]`/`in_year[-1]` even
+    # when the row at that particular end came from the NO-balance segment
+    # and so has no `balance_after` - leaving that one boundary `None` while
+    # the other, from the segment that does carry a balance, is already
+    # correct. Whichever side is known, together with the complete (already
+    # fail-closed-verified) in-year transactions, determines the other
+    # exactly, so derive it rather than reporting a hole that the other
+    # boundary already closes.
+    net = sum(t.amount for t in in_year)
+    if opening is None and closing is not None:
+        opening, opening_source = closing - net, "computed"
+    elif closing is None and opening is not None:
+        closing, closing_source = opening + net, "computed"
+
+    # Neither boundary derivable from any statement's own data: fall back to
+    # the owner-supplied anchor exactly as the no-balance-column path above
+    # does, rather than leaving a hole the anchor was there to fill.
+    if opening is None and anchor is not None:
+        opening, opening_source = anchor, "anchor"
+        closing, closing_source = anchor + net, "computed"
+
+    # Fires when EITHER boundary is unknown, not just the opening: a missing
+    # 30 June figure must never ship silently as "complete" (Finding 3).
+    missing = [label for label, source in
+               (("1 July", opening_source), ("30 June", closing_source))
+               if source == "unknown"]
+    if missing:
         checks.append(
-            _check("anchor_missing", "warn", "an opening balance", "none",
-                   f"{account.id} has no balance column and no anchor; enter the "
-                   "1 July balance in manual inputs", scope="account")
+            _check("anchor_missing", "warn", f"a balance for {' and '.join(missing)}", "none",
+                   f"{account.id} has no statement or anchor that determines its "
+                   f"{' and '.join(missing)} balance; enter it in manual inputs",
+                   scope="account")
         )
 
     if prior_year_closing is not None and opening is not None and opening != prior_year_closing:

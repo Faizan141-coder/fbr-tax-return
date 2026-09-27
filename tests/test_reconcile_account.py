@@ -219,3 +219,157 @@ def test_a_failed_statement_makes_the_account_failed(ty):
     led = merge_account([bad], _account(), ty, profiles=PROFILES)
     assert led.status == "failed"
     assert led.transactions == ()      # fail closed: contributes nothing
+
+
+# --- fix round 1 regressions -------------------------------------------------
+#
+# Three defects that all produced a confidently-labelled WRONG figure on the
+# wealth statement rather than an obvious failure, which is the one outcome
+# this tool must not have. Each test below fails against the behaviour that
+# preceded the fix; the before/after figures are recorded in the comments.
+
+# An account whose layout changed mid-year - one statement a running-balance
+# CSV, the next an export without a balance column - needs two DISTINCT
+# layout ids, since `profiles` is keyed by layout id. The no-balance variant
+# above deliberately shares MEEZAN's id (so its own tests stay single-layout),
+# so mixed-layout cases get their own.
+NO_BALANCE_LAYOUT = NO_BALANCE_PROFILE.model_copy(update={"id": "meezan.csv.nb.v1"})
+PROFILES_MIXED = {"meezan.csv.v1": MEEZAN, "meezan.csv.nb.v1": NO_BALANCE_LAYOUT}
+
+
+def test_a_tax_year_dormant_account_ignores_activity_before_the_year(ty):
+    # Finding 1. The statement runs a month early, and its only row predates
+    # the tax year. The printed opening (300000) is the balance on 1 June, not
+    # on 1 July: the 15 June credit has already landed by the time the tax
+    # year starts. Both boundaries are therefore 310000.
+    # Before: 300000/310000, both labelled "printed", status "complete".
+    stmt = build_statement(
+        opening=300000, start=date(2025, 6, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2025, 6, 15), "Before TY", 10000, None)],
+    )
+    led = merge_account([_result(stmt)], _account(), ty, profiles=PROFILES)
+    assert led.transactions == ()
+    assert led.opening == 310000 and led.opening_source == "computed"
+    assert led.closing == 310000 and led.closing_source == "computed"
+    # Not "printed": neither printed figure is a tax-year boundary, and a
+    # derived number must never claim the statement printed it.
+    assert led.status == "complete"
+
+
+def test_a_tax_year_dormant_account_ignores_activity_after_the_year(ty):
+    # Finding 1, mirrored. The statement runs a month late and its only row
+    # falls after 30 June, so it has not moved the balance by either boundary:
+    # the printed closing (310000) belongs to 31 July, not to 30 June.
+    # Before: 300000/310000, both labelled "printed", status "complete".
+    stmt = build_statement(
+        opening=300000, start=date(2025, 7, 1), end=date(2026, 7, 31),
+        rows=[SynthTxn(date(2026, 7, 15), "After TY", 10000, None)],
+    )
+    led = merge_account([_result(stmt)], _account(), ty, profiles=PROFILES)
+    assert led.transactions == ()
+    assert led.opening == 300000 and led.opening_source == "computed"
+    assert led.closing == 300000 and led.closing_source == "computed"
+    assert led.status == "complete"
+
+
+def test_partially_overlapping_statements_keep_each_real_row_exactly_once(ty):
+    # Finding 2. Jul-Dec and Nov-Jun both print November. Overlap detection
+    # used to require full containment, so neither statement contained the
+    # other, no overlap check fired, and November's single real transaction
+    # was counted twice - 4 rows where 3 are real, overstating income, and
+    # reported as "complete".
+    first = build_statement(
+        opening=100000, start=date(2025, 7, 1), end=date(2025, 12, 31),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None),
+              SynthTxn(date(2025, 11, 15), "N", 20000, None)],
+    )
+    second = build_statement(
+        opening=150000, start=date(2025, 11, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2025, 11, 15), "N", 20000, None),
+              SynthTxn(date(2026, 2, 1), "B", -30000, None)],
+    )
+    led = merge_account([_result(first), _result(second, sha="b" * 64)],
+                        _account(), ty, profiles=PROFILES)
+    assert [t.description for t in led.transactions] == ["A", "N", "B"]
+    assert len(led.transactions) == 3          # was 4: November counted twice
+    assert "overlap" in _kinds(led)            # the shared window is reported
+    assert "overlap" not in _kinds(led, "fail")   # ... and the two agree
+    # February survives: only the intersecting slice is resolved, never the
+    # whole of the later statement.
+    assert led.opening == 100000
+    assert led.closing == 140000
+    assert led.status == "complete"
+
+
+def test_mixed_profiles_recover_the_opening_when_the_early_half_has_no_balances(ty):
+    # Finding 3. The Jul-Dec export carries no balance column; the Jan-Jun one
+    # does. `has_balance` is true for the account as a whole, so the opening
+    # was read off the first in-year row - which has no balance - and came
+    # back None, while the warning claimed no anchor had been supplied when
+    # one had. Before: opening None/"unknown", a false "no anchor" warning,
+    # status "incomplete".
+    early = build_statement(
+        opening=500000, start=date(2025, 7, 1), end=date(2025, 12, 31),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )
+    late = build_statement(
+        opening=550000, start=date(2026, 1, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2026, 2, 1), "B", -20000, None)],
+    )
+    led = merge_account(
+        [_result(early, NO_BALANCE_LAYOUT), _result(late, MEEZAN, sha="b" * 64)],
+        _account(), ty, anchor=500000, profiles=PROFILES_MIXED,
+    )
+    assert len(led.transactions) == 2
+    # The half that does carry balances, plus the year's net movement, fixes
+    # the 1 July figure exactly - and it agrees with the anchor the owner gave.
+    assert led.opening == 500000 and led.opening_source == "computed"
+    assert led.closing == 530000 and led.closing_source == "printed"
+    assert "anchor_missing" not in _kinds(led, "warn")   # an anchor WAS supplied
+    assert led.status == "complete"
+
+
+def test_mixed_profiles_recover_the_closing_when_the_late_half_has_no_balances(ty):
+    # Finding 3, mirrored, and the dangerous half: the 30 June figure - the
+    # one the owner types onto the wealth statement - came back None with NO
+    # warning at all and status "complete". A missing 30 June figure must
+    # never ship as complete. Before: closing None/"unknown", status
+    # "complete", no warning.
+    early = build_statement(
+        opening=500000, start=date(2025, 7, 1), end=date(2025, 12, 31),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )
+    late = build_statement(
+        opening=550000, start=date(2026, 1, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2026, 2, 1), "B", -20000, None)],
+    )
+    led = merge_account(
+        [_result(early, MEEZAN), _result(late, NO_BALANCE_LAYOUT, sha="b" * 64)],
+        _account(), ty, profiles=PROFILES_MIXED,
+    )
+    assert len(led.transactions) == 2
+    assert led.opening == 500000 and led.opening_source == "printed"
+    assert led.closing == 530000 and led.closing_source == "computed"
+    assert led.closing_source != "unknown"
+    # Complete is only honest because the figure is now determined, not
+    # because a hole went unreported - see the next test for the other case.
+    assert led.status == "complete"
+
+
+def test_an_undeterminable_closing_balance_is_named_in_the_warning(ty):
+    # Finding 3, the invariant behind both halves: when nothing - statement
+    # or anchor - determines a boundary, the warning must say which boundary,
+    # and the account must not be complete. The warning used to speak only of
+    # the 1 July balance and only fired when the OPENING was unknown, so an
+    # unknown 30 June figure could pass silently.
+    stmt = build_statement(
+        opening=0, start=date(2025, 7, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2025, 8, 1), "A", 50000, None)],
+    )
+    res = parse_tabular(write_meezan_csv(stmt), NO_BALANCE_PROFILE, sha256="a" * 64,
+                        filename="x.csv", account_id="meezan-main")
+    led = merge_account([res], _account(), ty, profiles=PROFILES_NB)
+    assert led.closing is None and led.closing_source == "unknown"
+    warning = next(c for c in led.checks if c.kind == "anchor_missing")
+    assert "30 June" in warning.expected and "30 June" in warning.detail
+    assert led.status != "complete"
