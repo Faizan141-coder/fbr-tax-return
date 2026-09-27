@@ -2,6 +2,7 @@ from datetime import date
 
 import pytest
 
+from fbr.config.loader import run_selftest
 from fbr.config.schema_profile import Profile
 from fbr.engines.tabular import ParseError, parse_row, parse_tabular
 from tests.fixtures.synth import (
@@ -69,6 +70,30 @@ NAYAPAY = Profile.model_validate({
         "row": {"Date": "01 Jul 2025", "Time": "10:15 AM", "Type": "IBFT In",
                 "Description": "x", "Amount": "+Rs. 500.00", "Balance": "Rs. 1,500.00"},
         "expect_date": date(2025, 7, 1), "expect_amount": 50000}]},
+})
+
+
+NO_BALANCE_IN_SELFTEST = Profile.model_validate({
+    "id": "meezan.csv.v2-no-balance-selftest", "institution": "Meezan Bank Limited",
+    "container": "csv", "valid_from": date(2025, 7, 1),
+    "detect": {"header_contains": ["Booking Date", "Value Date"]},
+    "columns": {"date": "Booking Date", "value_date": "Value Date",
+                "description": "Description", "reference": "Doc No",
+                "debit": "Debit", "credit": "Credit", "balance": "Available Balance"},
+    "formats": {"dates": ["%d %b %Y"], "sign": "columns"},
+    "summary": {
+        "opening": r"(?i)OPENING\s+BALANCE\D+?(?P<value>-?[\d,]+\.\d{2})",
+        "closing": r"(?i)CLOSING\s+BALANCE\D+?(?P<value>-?[\d,]+\.\d{2})",
+    },
+    "balance": {"semantics": "running", "kind": "available"},
+    "selftest": {"cases": [{
+        # Deliberately omits "Available Balance": a selftest case pins only
+        # (date, amount), so parse_row/run_selftest must not require a
+        # balance column just because the profile declares a running one.
+        "row": {"Booking Date": "01 Jul 2025", "Value Date": "01 Jul 2025",
+                "Doc No": "D00001", "Description": "Top-up", "Debit": "",
+                "Credit": "1,000.00"},
+        "expect_date": date(2025, 7, 1), "expect_amount": 100000}]},
 })
 
 
@@ -228,3 +253,28 @@ def test_unknown_date_format_is_unresolved():
     data = write_meezan_csv(stmt).replace(bad_stamp, b"2025/07/01")
     res = _parse(data, MEEZAN)
     assert any("date" in u.reason.lower() for u in res.unresolved)
+
+
+def test_selftest_case_may_omit_balance_but_a_real_statement_may_not():
+    # Forward-looking fix (coordinator review, fix round 1): the "balance"
+    # required-role fix must bind parse_tabular but NOT parse_row. A
+    # selftest case pins (date, amount) only and has no reason to also carry
+    # a balance column; if parse_row required one anyway, a profile whose
+    # selftest case omitted it would raise inside run_selftest, be marked
+    # ok=False, and be silently excluded from layout detection - the only
+    # symptom being "unknown layout" on a file that should have parsed.
+    # A real statement missing the same column must still raise ParseError:
+    # that is the bug the earlier fix correctly closed, and this test must
+    # not let it re-open.
+    profile = NO_BALANCE_IN_SELFTEST
+    case = profile.selftest.cases[0]
+
+    assert parse_row(profile, case.row) == (case.expect_date, case.expect_amount)
+
+    status = run_selftest(profile, parse_row)
+    assert status.ok, status.message
+
+    stmt = build_statement(seed=19)
+    data = write_meezan_csv(stmt).replace(b"Available Balance", b"Closing Bal")
+    with pytest.raises(ParseError, match="Available Balance"):
+        _parse(data, profile)

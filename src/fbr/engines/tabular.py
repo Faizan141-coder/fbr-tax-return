@@ -102,8 +102,16 @@ def _find_header(rows: list[list[str]], profile: Profile) -> int:
     )
 
 
-def _map_columns(header: list[str], profile: Profile) -> dict[str, int]:
-    """Map each profile role to a column index by header name."""
+def _map_columns(
+    header: list[str], profile: Profile, *, require_balance: bool = True
+) -> dict[str, int]:
+    """Map each profile role to a column index by header name.
+
+    `require_balance` is `False` only for `parse_row`'s selftest use: a
+    selftest case is a hand-picked dict pinning (date, amount) and has no
+    reason to also carry a balance column, so it must not be held to the
+    same requirement a real statement is.
+    """
     normalized = {c.strip().lower(): i for i, c in enumerate(header)}
     mapping: dict[str, int] = {}
     roles = ("date", "value_date", "description", "reference", "debit",
@@ -111,11 +119,15 @@ def _map_columns(header: list[str], profile: Profile) -> dict[str, int]:
     required = {"date", "description"}
     required |= ({"debit", "credit"} if profile.formats.sign == "columns" else {"amount"})
     # A profile that declares a running balance is asserting that every row
-    # carries one; if the column is missing/renamed, silently mapping no
-    # "balance" role would drop every balance_after to None with no error
-    # raised anywhere, which is the same silent-data-loss failure mode the
-    # unresolved-row mechanism exists to prevent for amounts.
-    if profile.balance.semantics == "running":
+    # of a real statement carries one; if the column is missing/renamed,
+    # silently mapping no "balance" role would drop every balance_after to
+    # None with no error raised anywhere, which is the same silent-data-loss
+    # failure mode the unresolved-row mechanism exists to prevent for
+    # amounts. This must not bind parse_row's selftest rows (require_balance
+    # is False there) or a profile whose selftest omits balance would raise
+    # inside run_selftest, be marked ok=False, and quietly stop matching any
+    # real statement.
+    if profile.balance.semantics == "running" and require_balance:
         required.add("balance")
 
     for role in roles:
@@ -196,10 +208,14 @@ def _amount_for(row: list[str], mapping: dict[str, int], profile: Profile) -> tu
 
 
 def parse_row(profile: Profile, row: dict[str, str]) -> tuple[date, int]:
-    """Parse one labelled row. Used by profile self-tests (loader.run_selftest)."""
+    """Parse one labelled row. Used by profile self-tests (loader.run_selftest).
+
+    Returns only (date, amount) — a selftest case has no use for a balance,
+    so this must not require the balance column a real statement would.
+    """
     header = list(row.keys())
     values = [row[k] for k in header]
-    mapping = _map_columns(header, profile)
+    mapping = _map_columns(header, profile, require_balance=False)
     d = _parse_date(_cell(values, mapping, "date"), profile)
     amount, _ = _amount_for(values, mapping, profile)
     return d, amount
