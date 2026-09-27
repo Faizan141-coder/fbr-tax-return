@@ -94,7 +94,15 @@ def build_statement(
         account_title=account_title,
         account_id=account_id,
         period_start=start,
-        period_end=end or (filled[-1].date if filled else start),
+        # The default period_end must bound every generated transaction, not
+        # just the last *printed* one: a statement built with rows out of
+        # date order (to test printed-order handling) would otherwise
+        # declare a period that excludes its own earlier-printed, later-dated
+        # row, and reconciliation would fail for a reason nobody intended
+        # (fix round 1, Finding 3). An explicit `end` still wins outright,
+        # since a test that deliberately puts a row outside the declared
+        # period depends on that.
+        period_end=end or (max((t.date for t in filled), default=start)),
         opening=opening,
         txns=tuple(filled),
     )
@@ -114,6 +122,8 @@ def write_meezan_csv(stmt: SynthStatement) -> bytes:
         [stmt.account_id, stmt.account_title],
         ["OPENING BALANCE", f"PKR {format_paisa(stmt.opening)}"],
         ["CLOSING BALANCE", f"PKR {format_paisa(stmt.closing)}"],
+        ["Total Credit", f"PKR {format_paisa(stmt.total_credit)}"],
+        ["Total Debit", f"PKR {format_paisa(stmt.total_debit)}"],
         ["Currency", "PKR"],
         ["Statement Period", period],
         ["Booking Date", "Value Date", "Doc No", "Description",
@@ -273,7 +283,7 @@ def corrupt(data: bytes, how: str) -> bytes:
                 r[a] = "+" + cell[1:]
     elif how == "wrong_total":
         for r in rows[:header_i]:
-            if r and r[0] in ("CLOSING BALANCE", "Closing Balance", "Total Income"):
+            if r and r[0] in ("CLOSING BALANCE", "Closing Balance", "Total Income", "Total Credit"):
                 r[1] = "PKR 1.00" if r[1].startswith("PKR") else "1.00"
     elif how == "bad_amount":
         hdr = rows[header_i]

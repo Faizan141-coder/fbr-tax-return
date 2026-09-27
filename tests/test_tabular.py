@@ -24,10 +24,21 @@ MEEZAN = Profile.model_validate({
                 "debit": "Debit", "credit": "Credit", "balance": "Available Balance"},
     "formats": {"dates": ["%d %b %Y"], "sign": "columns"},
     "summary": {
-        "opening": r"(?i)OPENING\s+BALANCE\D+?(?P<value>-?[\d,]+\.\d{2})",
-        "closing": r"(?i)CLOSING\s+BALANCE\D+?(?P<value>-?[\d,]+\.\d{2})",
-        "period_from": r"(?i)STATEMENT\s+PERIOD\D+?(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
-        "period_to": r"(?i)STATEMENT\s+PERIOD\D+?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\D+?"
+        # The separator between a label and its value is `[^\d\n]+?`, not
+        # `\D+?`: `\D` matches a newline just as readily as a space, so a
+        # lazy `\D+?` can walk straight past an unparseable value on its own
+        # line and harvest a number out of a completely unrelated row below
+        # it (fix round 1, Finding 2 - the same family of defect as an
+        # earlier greedy-`\D+` bug in this plan, just without a sign to
+        # invert). `[^\d\n]+?` cannot cross that line boundary, so a label
+        # with no parseable value of its own simply fails to match, which is
+        # what feeds the "not printed" warn path instead of a fabricated one.
+        "opening": r"(?i)OPENING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})",
+        "closing": r"(?i)CLOSING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})",
+        "total_credit": r"(?i)TOTAL\s+CREDIT[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})",
+        "total_debit": r"(?i)TOTAL\s+DEBIT[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})",
+        "period_from": r"(?i)STATEMENT\s+PERIOD[^\d\n]+?(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
+        "period_to": r"(?i)STATEMENT\s+PERIOD[^\d\n]+?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[^\d\n]+?"
                      r"(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
     },
     "balance": {"semantics": "running", "kind": "available"},

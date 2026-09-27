@@ -25,7 +25,24 @@ def test_a_clean_statement_passes_every_check():
 
 def test_all_five_checks_are_reported():
     _, checks = _checks(write_meezan_csv(build_statement(seed=32)))
-    assert {"running_balance", "opening_closing", "unresolved_rows", "date_range"} <= _kinds(checks)
+    assert _kinds(checks) == {
+        "running_balance", "opening_closing", "printed_totals",
+        "unresolved_rows", "date_range",
+    }
+
+
+def test_a_wrong_printed_total_fails_printed_totals():
+    # Fix round 1, Finding 1: printed_totals is the only check available for
+    # a statement that prints no balances at all (the SadaPay case), so it
+    # must actually be exercised rather than sit unverified because MEEZAN
+    # never printed a total for any test to corrupt.
+    _, checks = _checks(corrupt(write_meezan_csv(build_statement(seed=42)), "wrong_total"))
+    assert "printed_totals" in _kinds(checks, "fail")
+
+
+def test_a_correctly_printed_total_passes():
+    _, checks = _checks(write_meezan_csv(build_statement(seed=43)))
+    assert "printed_totals" in _kinds(checks, "pass")
 
 
 def test_a_dropped_row_breaks_the_running_balance():
@@ -67,6 +84,11 @@ def test_running_balance_walks_printed_order_not_date_order():
     )
     _, checks = _checks(write_meezan_csv(stmt))
     assert "running_balance" not in _kinds(checks, "fail")
+    # Fix round 1, Finding 3: this statement's printed period must be wide
+    # enough to cover both rows even though the later date is printed first;
+    # a period fixture that quietly excluded the first row would fail the
+    # whole statement for a reason this test never intended to exercise.
+    assert statement_usable(checks) is True
 
 
 def test_a_date_outside_the_printed_period_fails():
@@ -77,6 +99,28 @@ def test_a_date_outside_the_printed_period_fails():
     )
     _, checks = _checks(write_meezan_csv(stmt))
     assert "date_range" in _kinds(checks, "fail")
+
+
+def test_period_regex_does_not_cross_a_line_into_an_unrelated_row():
+    # Fix round 1, Finding 2: `\D+?` matches a newline as readily as a
+    # space, so a lazy non-digit separator could walk straight past an
+    # unparseable "Statement Period" value and harvest a fabricated period
+    # out of two unrelated rows below it. The fixed separator must refuse
+    # to cross that line boundary, leaving the period simply unprinted
+    # rather than wrong.
+    stmt = build_statement(seed=45)
+    period_line = (
+        f"Statement Period,{stmt.period_start.strftime('%d %b %Y')} to "
+        f"{stmt.period_end.strftime('%d %b %Y')}\r\n"
+    ).encode()
+    decoy = (b"Statement Period,not available\r\n"
+             b"Printed,05 Aug 2025\r\n"
+             b"Due,14 Sep 2025\r\n")
+    data = write_meezan_csv(stmt).replace(period_line, decoy)
+    res, checks = _checks(data)
+    assert res.document.summary.period_start is None
+    assert res.document.summary.period_end is None
+    assert "date_range" in _kinds(checks, "warn")
 
 
 def test_missing_opening_balance_warns_rather_than_fails():
