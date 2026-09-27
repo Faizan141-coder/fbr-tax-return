@@ -1,0 +1,17 @@
+[browser]
+gatherUsageStats = false
+serverAddress = "127.0.0.1"
+
+[server]
+address = "127.0.0.1"
+port = 8501
+headless = true
+showEmailPrompt = false
+enableXsrfProtection = true
+enableCORS = true
+allowedHosts = ["127.0.0.1", "localhost"]
+maxUploadSize = 25
+runOnSave = false
+
+[client]
+toolbarMode = "viewer"
