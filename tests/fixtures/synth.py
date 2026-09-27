@@ -108,11 +108,14 @@ def _csv_bytes(rows: list[list[str]]) -> bytes:
 
 def write_meezan_csv(stmt: SynthStatement) -> bytes:
     """Meezan CSV: preamble rows, then a header with Debit BEFORE Credit."""
+    period = (f"{stmt.period_start.strftime('%d %b %Y')} to "
+              f"{stmt.period_end.strftime('%d %b %Y')}")
     rows: list[list[str]] = [
         [stmt.account_id, stmt.account_title],
         ["OPENING BALANCE", f"PKR {format_paisa(stmt.opening)}"],
         ["CLOSING BALANCE", f"PKR {format_paisa(stmt.closing)}"],
         ["Currency", "PKR"],
+        ["Statement Period", period],
         ["Booking Date", "Value Date", "Doc No", "Description",
          "Debit", "Credit", "Available Balance"],
     ]

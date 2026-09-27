@@ -26,6 +26,9 @@ MEEZAN = Profile.model_validate({
     "summary": {
         "opening": r"(?i)OPENING\s+BALANCE\D+?(?P<value>-?[\d,]+\.\d{2})",
         "closing": r"(?i)CLOSING\s+BALANCE\D+?(?P<value>-?[\d,]+\.\d{2})",
+        "period_from": r"(?i)STATEMENT\s+PERIOD\D+?(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
+        "period_to": r"(?i)STATEMENT\s+PERIOD\D+?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\D+?"
+                     r"(?P<value>\d{1,2}\s+[A-Za-z]{3}\s+\d{4})",
     },
     "balance": {"semantics": "running", "kind": "available"},
     "selftest": {"cases": [{
