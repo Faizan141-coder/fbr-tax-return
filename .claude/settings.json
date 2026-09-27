@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv --version)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(grep -E '^python3\\(\\\\.[0-9]+\\)?$')",
+      "Bash(pdftotext -v)",
+      "Bash(mkdir -p /private/tmp/claude-501/-Users-faizanhasnaat-Documents-Github-fbr-tax-return/0ab13db0-f9cd-4df2-9df3-354d96822d53/scratchpad/src)",
+      "Bash(curl -sS -L -m 120 -o ito2025.pdf \"https://download1.fbr.gov.pk/Docs/2025881983148210Income-Tax-Ordinance,-2001-Amended-upto-31.07.2025.pdf\")",
+      "WebFetch(domain:help.nayapay.com)",
+      "WebFetch(domain:help.sadapay.pk)",
+      "Bash(curl -sL --max-time 60 \"https://download1.fbr.gov.pk/SROs/20247413755816SRONo.950\\(ManualReturn\\)2024.pdf\")",
+      "Bash(pdftotext -layout - -)",
+      "Bash(/usr/bin/python3 --version)",
+      "Bash(/opt/homebrew/bin/python3.14 --version)",
+      "Bash(sw_vers)",
+      "Bash(gs --version)",
+      "Bash(/usr/libexec/java_home -V)"
+    ]
+  }
+}
