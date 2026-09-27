@@ -1,0 +1,63 @@
+# Meezan Bank CSV export.
+#
+# STATUS: written against synthetic fixtures. Every line marked VERIFY must be
+# confirmed against a real `fbr-dump` before this profile is trusted on a
+# real statement.
+#
+# Known from research 03: the CSV export puts Debit BEFORE Credit, the reverse
+# of the app PDF. Columns are mapped by name, so the order does not matter -
+# but the LABELS below must match the real export exactly.
+
+id          = "meezan.csv.v1"
+institution = "Meezan Bank Limited"
+container   = "csv"
+valid_from  = 2025-07-01
+notes       = "CSV/XLSX export from the Meezan app or internet banking."
+
+[detect]
+header_contains = ["Booking Date", "Value Date"]   # VERIFY against a real export
+
+[columns]
+date        = "Booking Date"                       # VERIFY
+value_date  = "Value Date"                         # VERIFY
+reference   = "Doc No"                             # VERIFY
+description = "Description"                        # VERIFY
+debit       = "Debit"                              # VERIFY
+credit      = "Credit"                             # VERIFY
+balance     = "Available Balance"                  # VERIFY
+
+[formats]
+dates = ["%d %b %Y", "%d/%m/%Y", "%d/%m/%y"]       # VERIFY which one the export uses
+sign  = "columns"
+
+[rows]
+skip = ['(?i)^\s*(opening|closing)\s+balance']
+
+[summary]
+# Correction (carried forward from an earlier task's exact defect): `\D`
+# matches a newline, so a pattern anchored on `\D+?` as the separator can
+# reach clean across this preamble's other lines and harvest a value that
+# belongs to a different row entirely. `[^\d\n]+?` is the same "skip the
+# label text" separator but stops at the row boundary. The value itself
+# also now tolerates a leading `-` (`-?`) so a negative/overdrawn balance
+# keeps its sign - a GREEDY `[^\d\n]+` would itself swallow that minus sign
+# before the value group ever saw it, silently flipping the balance to
+# positive, which is why the separator stays non-greedy (`+?`).
+opening = '(?i)OPENING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'    # VERIFY
+closing = '(?i)CLOSING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'    # VERIFY
+
+[balance]
+semantics = "running"
+# VERIFY: does "Available Balance" behave as a ledger running balance, or does
+# it differ when funds are on hold? (spec §12)
+kind      = "available"
+
+[[selftest.cases]]
+row = { "Booking Date" = "01 Jul 2025", "Value Date" = "01 Jul 2025", "Doc No" = "D00001", "Description" = "Top-up", "Debit" = "", "Credit" = "1,000.00", "Available Balance" = "1,000.00" }
+expect_date   = 2025-07-01
+expect_amount = 100000
+
+[[selftest.cases]]
+row = { "Booking Date" = "15 Jan 2026", "Value Date" = "15 Jan 2026", "Doc No" = "D00002", "Description" = "ATM Cash Withdrawal", "Debit" = "2,500.00", "Credit" = "", "Available Balance" = "7,500.00" }
+expect_date   = 2026-01-15
+expect_amount = -250000

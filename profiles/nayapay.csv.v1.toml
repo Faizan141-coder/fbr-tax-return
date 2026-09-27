@@ -1,0 +1,75 @@
+# NayaPay CSV export.
+#
+# STATUS: written against synthetic fixtures. Lines marked VERIFY need a real
+# `fbr-dump`. Research 03 confirms the app exports "PDF or CSV", but the CSV
+# columns are undocumented.
+#
+# Open question from the spec: public NayaPay samples DO print Opening and
+# Closing Balance on the summary card, contradicting the original brief. The
+# summary patterns below assume they are present; if a real export omits them,
+# delete those two lines and the account will fall back to a manual anchor.
+
+id          = "nayapay.csv.v1"
+institution = "NayaPay"
+container   = "csv"
+valid_from  = 2025-07-01
+notes       = "CSV export from the NayaPay app (More -> Statements)."
+
+[detect]
+header_contains = ["Date", "Type", "Amount", "Balance"]    # VERIFY
+
+[columns]
+date        = "Date"                                       # VERIFY
+type        = "Type"                                       # VERIFY
+description = "Description"                                # VERIFY
+amount      = "Amount"                                     # VERIFY
+balance     = "Balance"                                    # VERIFY
+
+[formats]
+dates = ["%d %b %Y", "%d-%b-%Y"]                           # VERIFY
+sign  = "signed"
+
+[rows]
+skip = ['(?i)carried\s+forward', '(?i)^\s*page\s+\d+\s+of\s+\d+']
+
+[summary]
+# Correction (carried forward from an earlier task's exact defect): `\D`
+# matches a newline, so a pattern anchored on `\D+?` as the separator can
+# reach clean across this preamble's other lines and harvest a value that
+# belongs to a different row entirely. `[^\d\n]+?` is the same "skip the
+# label text" separator but stops at the row boundary. The value itself
+# also now tolerates a leading `-` (`-?`) so a negative/overdrawn balance
+# keeps its sign - a GREEDY `[^\d\n]+` would itself swallow that minus sign
+# before the value group ever saw it, silently flipping the balance to
+# positive, which is why the separator stays non-greedy (`+?`).
+opening      = '(?i)Opening\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VERIFY it exists
+closing      = '(?i)Closing\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VERIFY it exists
+total_credit = '(?i)Total\s+Income[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'      # VERIFY
+total_debit  = '(?i)Total\s+Spent[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'       # VERIFY
+
+[balance]
+# semantics = "none", NOT "running" as first drafted. Bug found while
+# proving this profile against build_statement(seed=81/82): those seeds put
+# the account into overdraft on every row, and the synthetic NayaPay writer
+# renders a negative running balance as "Rs. -1,234.56" - the sign glued
+# AFTER the "Rs. " prefix (unlike its own Amount column, which correctly
+# puts the sign first: "-Rs. 1,234.56"). money.parse_paisa only accepts a
+# sign BEFORE a PKR/Rs prefix, so that text is unparseable, and under
+# semantics="running" an unreadable balance drops the WHOLE row as
+# unresolved (fbr.engines.tabular.parse_tabular), not just the balance -
+# silently shrinking the transaction count on an ordinary overdrawn
+# statement. Left as "none" until a real fbr-dump shows how the live app
+# actually prints a negative balance; the [columns] mapping below is kept
+# so switching back to "running" is a one-line change once that's known.
+semantics = "none"                                          # VERIFY
+kind      = "ledger"
+
+[[selftest.cases]]
+row = { "Date" = "01 Jul 2025", "Time" = "10:15 AM", "Type" = "IBFT In", "Description" = "Incoming fund transfer", "Amount" = "+Rs. 5,000.00", "Balance" = "Rs. 15,000.00" }
+expect_date   = 2025-07-01
+expect_amount = 500000
+
+[[selftest.cases]]
+row = { "Date" = "02 Jul 2025", "Time" = "11:00 AM", "Type" = "IBFT Out", "Description" = "Outgoing fund transfer", "Amount" = "-Rs. 2,000.00", "Balance" = "Rs. 13,000.00" }
+expect_date   = 2025-07-02
+expect_amount = -200000

@@ -1,0 +1,60 @@
+# MCB Live CSV export.
+#
+# STATUS: written against synthetic fixtures. Lines marked VERIFY need a real
+# `fbr-dump`. Research 03 confirms MCB Live offers "Download in CSV format",
+# but its column layout is not published anywhere.
+#
+# The Dr/Cr suffix is glued to the amount (e.g. "1,234.00Dr"), so sign comes
+# from the suffix rather than from separate columns.
+
+id          = "mcb.csv.v1"
+institution = "MCB Bank Limited"
+container   = "csv"
+valid_from  = 2025-07-01
+notes       = "CSV export from MCB Live (Account Management -> Download Statement)."
+
+[detect]
+header_contains = ["Date", "Reference Number", "Amount"]   # VERIFY
+
+[columns]
+date        = "Date"                                       # VERIFY
+description = "Description"                                # VERIFY
+reference   = "Reference Number"                           # VERIFY
+amount      = "Amount"                                     # VERIFY
+balance     = "Balance"                                    # VERIFY
+
+[formats]
+dates         = ["%d %b %Y", "%d/%m/%y", "%d/%m/%Y"]       # VERIFY
+sign          = "suffix"
+debit_tokens  = ["Dr", "DR", "dr"]                         # VERIFY exact casing
+credit_tokens = ["Cr", "CR", "cr"]                         # VERIFY
+
+[rows]
+skip = ['(?i)^\s*(opening|closing)\s+balance']
+
+[summary]
+# Correction (carried forward from an earlier task's exact defect): `\D`
+# matches a newline, so a pattern anchored on `\D+?` as the separator can
+# reach clean across this preamble's other lines and harvest a value that
+# belongs to a different row entirely. `[^\d\n]+?` is the same "skip the
+# label text" separator but stops at the row boundary. The value itself
+# also now tolerates a leading `-` (`-?`) so a negative/overdrawn balance
+# keeps its sign - a GREEDY `[^\d\n]+` would itself swallow that minus sign
+# before the value group ever saw it, silently flipping the balance to
+# positive, which is why the separator stays non-greedy (`+?`).
+opening = '(?i)Opening\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VERIFY
+closing = '(?i)Closing\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VERIFY
+
+[balance]
+semantics = "running"
+kind      = "ledger"
+
+[[selftest.cases]]
+row = { "Date" = "01 Jul 2025", "Description" = "INTERBANK FUNDS RECEIVING", "Reference Number" = "1000000001", "Amount" = "5,000.00Cr", "Balance" = "15,000.00" }
+expect_date   = 2025-07-01
+expect_amount = 500000
+
+[[selftest.cases]]
+row = { "Date" = "02 Jul 2025", "Description" = "Cash Withdrawal", "Reference Number" = "1000000002", "Amount" = "2,000.00Dr", "Balance" = "13,000.00" }
+expect_date   = 2025-07-02
+expect_amount = -200000

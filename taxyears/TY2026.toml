@@ -1,0 +1,169 @@
+# Tax Year 2026: 1 July 2025 - 30 June 2026.
+#
+# Codes, labels and sources come from docs/research/02-fbr-iris-codes.md.
+# `verification` records HOW each code is known, so the UI can mark figures
+# the owner still has to confirm against live IRIS:
+#   iris_verified      - owner confirmed on the live IRIS screen
+#   form_text          - read from an FBR form with a real text layer
+#   form_scan          - read by OCR from a scanned FBR form
+#   prior_year_assumed - carried over from TY2025
+#   unknown            - not known; code left blank
+
+name         = "TY2026"
+period_start = 2025-07-01
+period_end   = 2026-06-30
+atl          = true          # the owner files every year; affects sanity rates only
+
+# --- Income -----------------------------------------------------------------
+
+[codes.export_receipts]
+code         = "64060285"
+label        = "Export of services u/s 154A @1%"
+tab          = "Business / Final Tax"
+columns      = { "1" = "Receipts", "2" = "Tax deducted", "3" = "Tax chargeable (IRIS computes)" }
+source       = "SRO 1495(I)/2026 p.15; wording confirmed in TY2024 form text (SRO 950(I)/2024 row 110)"
+verification = "form_scan"
+
+[codes.export_receipts_pseb]
+code         = "64060290"
+label        = "Export of IT/ITeS Services u/s 154A @ 0.25%"
+tab          = "Business / Final Tax"
+columns      = { "1" = "Receipts", "2" = "Tax deducted" }
+source       = "SRO 1495(I)/2026 p.15 (not used: the owner is not PSEB-certified)"
+verification = "form_scan"
+
+[codes.business_income_total]
+code         = "3000"
+label        = "Income / (Loss) from Business"
+tab          = "Business"
+columns      = { "1" = "Head total" }
+source       = "SRO 1495(I)/2026 p.36"
+verification = "form_scan"
+
+[codes.profit_on_debt_income]
+code         = "500312"
+label        = "Profit on Debt"
+tab          = "Other Sources / Receipts"
+columns      = { "1" = "Total", "2" = "Subject to final tax", "3" = "Subject to normal tax" }
+source       = "SRO 1562(I)/2025 p.55; TY2026 digits illegible in the scan"
+verification = "prior_year_assumed"
+
+[codes.profit_final]
+code         = "64040052"
+label        = "Profit on Debt u/s 151(1)(b) from Bank Accounts / Deposits"
+tab          = "Other Sources / Final Tax"
+columns      = { "1" = "Gross profit", "2" = "Tax deducted" }
+source       = "SRO 1495(I)/2026 p.23"
+verification = "form_scan"
+
+[codes.profit_adjustable]
+code         = "64040002"
+label        = "Profit on Debt u/s 151(1)(b) from Bank Accounts / Deposits"
+tab          = "Adjustable Tax"
+columns      = { "1" = "Receipts", "2" = "Tax deducted" }
+source       = "SRO 1495(I)/2026 p.29; used only when total profit exceeds Rs 5m"
+verification = "form_scan"
+
+# --- Withholding ------------------------------------------------------------
+
+[codes.salary_149]
+code         = "64020004"
+label        = "Salary of Employees u/s 149"
+tab          = "Adjustable Tax"
+columns      = { "1" = "Receipts", "2" = "Tax deducted" }
+source       = "SRO 1495(I)/2026 pp.4, 29"
+verification = "form_scan"
+
+[codes.tax_236y]
+code         = "64151905"
+label        = "Persons remitting amount abroad through credit / debit / prepaid cards u/s 236Y"
+tab          = "Adjustable Tax"
+columns      = { "1" = "Amount remitted", "2" = "Tax collected" }
+source       = "SRO 1495(I)/2026 p.30"
+verification = "form_scan"
+
+[codes.tax_231ab]
+code         = "64100101"
+label        = "Advance tax on cash withdrawal u/s 231AB"
+tab          = "Adjustable Tax"
+columns      = { "1" = "Amount withdrawn", "2" = "Tax collected" }
+source       = "SRO 1562(I)/2025 p.59; TY2026 not confirmed"
+verification = "prior_year_assumed"
+
+[codes.withholding_total]
+code         = "9201"
+label        = "Withholding Income Tax"
+tab          = "Computations"
+columns      = { "1" = "Total (IRIS computes)" }
+source       = "SRO 1495(I)/2026 p.36"
+verification = "form_scan"
+
+# --- Allowances -------------------------------------------------------------
+
+[codes.zakat]
+code         = "9001"
+label        = "Zakat u/s 60"
+tab          = "Deductible Allowances"
+columns      = { "1" = "Total", "2" = "Inadmissible", "3" = "Admissible" }
+source       = "SRO 1562(I)/2025 p.56; TY2026 dialog shows the label but no code"
+verification = "prior_year_assumed"
+
+# --- Wealth statement -------------------------------------------------------
+
+[codes.wealth_bank_accounts]
+code         = ""
+label        = "Bank Account(s)"
+tab          = "Wealth Statement / Financial Assets & Investments (Non-Business)"
+columns      = { }
+source       = "SRO 1495(I)/2026 p.38: code cell illegible. TY2025 used 7006. Owner action A1: read it off IRIS."
+verification = "unknown"
+
+[codes.wealth_cash]
+code         = ""
+label        = "Cash in hand"
+tab          = "Wealth Statement / Financial Assets & Investments (Non-Business)"
+columns      = { }
+source       = "SRO 1495(I)/2026 p.38: illegible. TY2025 used 7012."
+verification = "unknown"
+
+[codes.wealth_foreign_total]
+code         = "701902"
+label        = "Total Foreign Assets"
+tab          = "116A - Foreign Assets / Liabilities"
+columns      = { }
+source       = "SRO 1495(I)/2026 p.37"
+verification = "form_scan"
+
+# --- Thresholds (paisa) and windows (days) ----------------------------------
+
+[thresholds]
+profit_final_regime_max  = 500000000   # Rs 5,000,000: above this, s.7B stops applying
+s111_4_cap               = 500000000   # Rs 5,000,000: s.111(4) protection for remittances
+review_threshold         = 1000000     # Rs 10,000: credits at or above this go to review
+wht_ratio_tolerance_pp   = 1.0         # percentage points before a WHT rate is queried
+profit_wht_window_days   = 1
+tax154a_window_days      = 1
+tax154a_amount_tolerance = 100         # Rs 1: banks may round tax to the rupee
+transfer_window_days     = 3
+transfer_fee_tolerance   = 10000       # Rs 100: IBFT fee netted out of a transfer
+reversal_window_days     = 30
+
+# --- Sanity-check rates -----------------------------------------------------
+# Used ONLY to flag anomalies. The tool never computes an IRIS figure from a
+# rate; it reports the tax actually deducted.
+
+[rates]
+s151_atl       = 0.20      # raised from 15% by the Finance Act 2025
+s151_non_atl   = 0.40
+s7b            = 0.20
+s236y_atl      = 0.05
+s236y_non_atl  = 0.10
+s231ab_non_atl = 0.008
+s154a          = 0.01      # the owner's rate (not PSEB-certified)
+s154a_pseb     = 0.0025
+
+# --- Display templates -------------------------------------------------------
+
+[templates]
+wealth_line = "{iban} - {title} - {institution_upper} - {ownership}"
+profit_line = "Profit on Debt u/s 151(1)(b) from Bank Accounts/Deposits - Profit on Savings Account - Investment in {institution}"
