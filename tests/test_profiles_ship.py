@@ -9,7 +9,13 @@ from fbr.config.loader import load_profiles, load_tax_year, run_selftest
 from fbr.engines.tabular import parse_row, parse_tabular
 from fbr.ingest import detect_layout
 from fbr.reconcile import check_statement, statement_usable
-from tests.fixtures.synth import build_statement, write_mcb_csv, write_meezan_csv, write_nayapay_csv
+from tests.fixtures.synth import (
+    build_statement,
+    corrupt,
+    write_mcb_csv,
+    write_meezan_csv,
+    write_nayapay_csv,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,8 +53,39 @@ def test_each_profile_detects_and_reconciles_its_own_layout(shipped, writer, exp
     result = parse_tabular(data, profile, sha256="a" * 64, filename="x.csv",
                            account_id="acct")
     assert len(result.transactions) == len(stmt.txns)
-    assert statement_usable(check_statement(result, profile)), \
-        [c for c in check_statement(result, profile) if c.status == "fail"]
+    checks = check_statement(result, profile)
+    assert statement_usable(checks), [c for c in checks if c.status == "fail"]
+
+    # Fix round 1, Finding 2: every shipped profile now defines total_credit/
+    # total_debit patterns, so printed_totals must actually run - not sit
+    # absent (None, filtered out of `checks`) - and pass, for every layout.
+    printed_totals = next((c for c in checks if c.kind == "printed_totals"), None)
+    assert printed_totals is not None, f"{expected_id}: printed_totals did not run"
+    assert printed_totals.status == "pass", printed_totals.detail
+
+
+@pytest.mark.parametrize(
+    "writer,expected_id",
+    [
+        (write_meezan_csv, "meezan.csv.v1"),
+        (write_mcb_csv, "mcb.csv.v1"),
+        (write_nayapay_csv, "nayapay.csv.v1"),
+    ],
+)
+def test_printed_totals_fails_closed_when_a_bank_total_is_wrong(shipped, writer, expected_id):
+    # Fix round 1, Finding 2: printed_totals is not just wired up, it is
+    # load-bearing - a statement whose own declared total disagrees with
+    # what was actually parsed must fail closed, for every shipped profile.
+    stmt = build_statement(seed=90, start=date(2025, 7, 1), end=date(2026, 6, 30))
+    data = corrupt(writer(stmt), "wrong_total")
+    profile = shipped.by_id(expected_id)
+    result = parse_tabular(data, profile, sha256="c" * 64, filename="x.csv",
+                           account_id="acct")
+    checks = check_statement(result, profile)
+    printed_totals = next((c for c in checks if c.kind == "printed_totals"), None)
+    assert printed_totals is not None, f"{expected_id}: printed_totals did not run"
+    assert printed_totals.status == "fail"
+    assert not statement_usable(checks)
 
 
 def test_no_two_shipped_profiles_match_the_same_file(shipped):

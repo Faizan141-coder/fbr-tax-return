@@ -48,20 +48,7 @@ total_credit = '(?i)Total\s+Income[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'      # VE
 total_debit  = '(?i)Total\s+Spent[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'       # VERIFY
 
 [balance]
-# semantics = "none", NOT "running" as first drafted. Bug found while
-# proving this profile against build_statement(seed=81/82): those seeds put
-# the account into overdraft on every row, and the synthetic NayaPay writer
-# renders a negative running balance as "Rs. -1,234.56" - the sign glued
-# AFTER the "Rs. " prefix (unlike its own Amount column, which correctly
-# puts the sign first: "-Rs. 1,234.56"). money.parse_paisa only accepts a
-# sign BEFORE a PKR/Rs prefix, so that text is unparseable, and under
-# semantics="running" an unreadable balance drops the WHOLE row as
-# unresolved (fbr.engines.tabular.parse_tabular), not just the balance -
-# silently shrinking the transaction count on an ordinary overdrawn
-# statement. Left as "none" until a real fbr-dump shows how the live app
-# actually prints a negative balance; the [columns] mapping below is kept
-# so switching back to "running" is a one-line change once that's known.
-semantics = "none"                                          # VERIFY
+semantics = "running"
 kind      = "ledger"
 
 [[selftest.cases]]

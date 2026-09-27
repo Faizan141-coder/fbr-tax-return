@@ -43,8 +43,12 @@ skip = ['(?i)^\s*(opening|closing)\s+balance']
 # keeps its sign - a GREEDY `[^\d\n]+` would itself swallow that minus sign
 # before the value group ever saw it, silently flipping the balance to
 # positive, which is why the separator stays non-greedy (`+?`).
-opening = '(?i)OPENING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'    # VERIFY
-closing = '(?i)CLOSING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'    # VERIFY
+opening      = '(?i)OPENING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VERIFY
+closing      = '(?i)CLOSING\s+BALANCE[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'   # VERIFY
+# Fix round 1, Finding 2: the writer also prints Total Credit/Total Debit,
+# but nothing checked them against the parsed totals until now.
+total_credit = '(?i)Total\s+Credit[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'      # VERIFY
+total_debit  = '(?i)Total\s+Debit[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'       # VERIFY
 
 [balance]
 semantics = "running"

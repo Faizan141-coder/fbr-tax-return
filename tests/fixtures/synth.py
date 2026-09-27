@@ -141,11 +141,23 @@ def write_meezan_csv(stmt: SynthStatement) -> bytes:
 
 
 def write_mcb_csv(stmt: SynthStatement) -> bytes:
-    """MCB CSV: one Amount column carrying a glued Dr/Cr suffix."""
+    """MCB CSV: one Amount column carrying a glued Dr/Cr suffix.
+
+    Task 14 fix round 1, Finding 2: adds Total Credit/Total Debit preamble
+    rows so mcb.csv.v1's printed_totals check has real text to verify.
+    Neither the task brief nor docs/research/03-statement-formats.md
+    confirms MCB actually prints such a line (only Opening/Closing Balance
+    are documented there) - this mirrors Meezan's own already-established
+    Total Credit/Total Debit rows below, which are equally unconfirmed, for
+    symmetry between the two writers. The corresponding profile patterns
+    are marked VERIFY like every other guessed label.
+    """
     rows: list[list[str]] = [
         ["Account Number", stmt.account_id],
         ["Opening Balance", format_paisa(stmt.opening)],
         ["Closing Balance", format_paisa(stmt.closing)],
+        ["Total Credit", format_paisa(stmt.total_credit)],
+        ["Total Debit", format_paisa(stmt.total_debit)],
         ["Date", "Description", "Reference Number", "Amount", "Balance"],
     ]
     for i, t in enumerate(stmt.txns, start=1):
@@ -159,7 +171,19 @@ def write_mcb_csv(stmt: SynthStatement) -> bytes:
 
 
 def write_nayapay_csv(stmt: SynthStatement) -> bytes:
-    """NayaPay CSV: signed amounts and a running balance."""
+    """NayaPay CSV: signed amounts and a running balance.
+
+    Task 14 fix round 1, Finding 1: the Balance cell used to render a
+    negative balance as "Rs. -1,234.56" - the sign glued AFTER the "Rs. "
+    prefix, unlike the Amount column below, which correctly puts the sign
+    first ("-Rs. 1,234.56"). money.parse_paisa only accepts a sign before a
+    PKR/Rs prefix, so that text was unparseable, and under
+    balance.semantics="running" an unreadable balance drops the WHOLE row
+    as unresolved (fbr.engines.tabular.parse_tabular), not just the
+    balance - silently shrinking the transaction count on an ordinary
+    overdrawn statement. The balance now carries its sign the same way the
+    amount already does; a non-negative balance renders exactly as before.
+    """
     rows: list[list[str]] = [
         ["Account", stmt.account_id],
         ["Opening Balance", format_paisa(stmt.opening)],
@@ -170,11 +194,12 @@ def write_nayapay_csv(stmt: SynthStatement) -> bytes:
     ]
     for t in stmt.txns:
         sign = "+" if t.amount > 0 else "-"
+        balance_sign = "-" if t.balance_after < 0 else ""
         rows.append([
             t.date.strftime("%d %b %Y"), "10:15 AM",
             "IBFT In" if t.amount > 0 else "IBFT Out", t.description,
             f"{sign}Rs. {format_paisa(abs(t.amount))}",
-            f"Rs. {format_paisa(t.balance_after)}",
+            f"{balance_sign}Rs. {format_paisa(abs(t.balance_after))}",
         ])
     return _csv_bytes(rows)
 
