@@ -97,7 +97,12 @@ REGISTRY = Registry(
     accounts=(
         Account(
             id="meezan-main", institution="Meezan Bank Limited", kind="bank",
-            iban="PK00TEST0000000000000000", account_number="0000000000",
+            # The account number is deliberately NOT a substring of the IBAN.
+            # It used to be "0000000000", which the IBAN below contains
+            # verbatim, so test_resolves_an_account_by_iban could not tell an
+            # IBAN match from an account-number match - it would have passed
+            # either way and proved neither.
+            iban="PK00TEST0000000000000000", account_number="1122334455",
             wallet_number="", title="ACCOUNT TITLE", type="Saving", ownership="Self",
             currency="PKR", statement_expected=True, match_hints=("MEEZAN",),
         ),
@@ -112,12 +117,20 @@ REGISTRY = Registry(
 
 
 def test_resolves_an_account_by_iban():
-    s = DocumentSummary(account_identifier="PK00TEST0000000000000000")
+    account = REGISTRY.by_id("meezan-main")
+    # Pin what makes this test meaningful: if the account number were a
+    # substring of the IBAN, the account-number branch alone could satisfy
+    # the assertion below and the IBAN branch could be broken unnoticed.
+    assert account.account_number not in account.iban
+    s = DocumentSummary(account_identifier=account.iban)
     assert resolve_account(s, "", REGISTRY) == "meezan-main"
 
 
 def test_resolves_by_account_number_inside_free_text():
-    assert resolve_account(DocumentSummary(), "Account No 0000000000", REGISTRY) == "meezan-main"
+    account = REGISTRY.by_id("meezan-main")
+    text = f"Account No {account.account_number}"
+    assert account.iban not in text        # the IBAN branch cannot be what matched
+    assert resolve_account(DocumentSummary(), text, REGISTRY) == "meezan-main"
 
 
 def test_resolves_by_wallet_number():
@@ -131,6 +144,82 @@ def test_iban_match_ignores_spacing_and_case():
 
 def test_returns_none_when_nothing_matches():
     assert resolve_account(DocumentSummary(), "no identifiers here", REGISTRY) is None
+
+
+# --- spec §4.2: the PRINTED account identifier is what links a statement ----
+#
+# The registry below declares the wallet FIRST, which is what made the old
+# "squash everything into one haystack, return the first account found"
+# implementation misattribute a whole bank statement to a wallet.
+
+WALLET_FIRST = Registry(
+    owner=Owner(name="OWNER NAME"),
+    accounts=(
+        Account(
+            id="nayapay", institution="NayaPay", kind="wallet", iban="",
+            account_number="", wallet_number="03001234567", title="ACCOUNT TITLE",
+            type="", ownership="Self", currency="PKR", statement_expected=True,
+        ),
+        Account(
+            id="meezan-main", institution="Meezan Bank Limited", kind="bank",
+            iban="PK00TEST0000000000000000", account_number="1122334455",
+            wallet_number="", title="ACCOUNT TITLE", type="Saving", ownership="Self",
+            currency="PKR", statement_expected=True,
+        ),
+    ),
+)
+
+
+def test_a_unique_printed_identifier_resolves_the_account():
+    s = DocumentSummary(account_identifier="PK00TEST0000000000000000")
+    assert resolve_account(s, "", WALLET_FIRST) == "meezan-main"
+
+
+def test_body_text_naming_another_account_never_overrides_the_printed_one():
+    # The exact reproduction: a Meezan statement whose printed identifier is
+    # the Meezan IBAN, and whose description happens to name a wallet number
+    # that belongs to a DIFFERENT registry account, declared first. Before
+    # the fix this returned "nayapay" and every Meezan row was booked to the
+    # wallet.
+    s = DocumentSummary(account_identifier="PK00TEST0000000000000000")
+    body = "01 Jul 2025,Raast P2P Fund transfer to 0300 1234567,5,000.00"
+    assert resolve_account(s, body, WALLET_FIRST) == "meezan-main"
+
+
+def test_two_accounts_matching_resolve_to_none_rather_than_guessing():
+    # An unassigned file is reported to the owner and recoverable on the Load
+    # page; a wrongly attributed one silently produces wrong figures.
+    twins = Registry(
+        owner=Owner(name="OWNER NAME"),
+        accounts=(
+            Account(id="joint-a", institution="Bank", kind="bank",
+                    iban="PK00TEST0000000000000000", account_number="", wallet_number="",
+                    title="T", type="Saving", ownership="Self", currency="PKR",
+                    statement_expected=True),
+            Account(id="joint-b", institution="Bank", kind="bank",
+                    iban="PK00TEST0000000000000000", account_number="", wallet_number="",
+                    title="T", type="Current", ownership="50%", currency="PKR",
+                    statement_expected=True),
+        ),
+    )
+    s = DocumentSummary(account_identifier="PK00TEST0000000000000000")
+    assert resolve_account(s, "", twins) is None
+
+
+def test_two_accounts_named_only_in_body_text_also_resolve_to_none():
+    # Same rule on the fallback path: with no printed identifier, body text
+    # naming two different registry accounts is not evidence for either.
+    body = ("PK00TEST0000000000000000,ACCOUNT TITLE\n"
+            "01 Jul 2025,Raast P2P Fund transfer to 0300 1234567,5,000.00")
+    assert resolve_account(DocumentSummary(), body, WALLET_FIRST) is None
+
+
+def test_body_text_is_used_only_when_the_printed_identifier_matches_nothing():
+    # A printed identifier that names no registry account at all must not
+    # block the fallback - that is the ordinary case for a layout whose
+    # profile has no [summary] account_id pattern yet.
+    s = DocumentSummary(account_identifier="PK00TEST9999999999999999")
+    assert resolve_account(s, "Account No 1122334455", WALLET_FIRST) == "meezan-main"
 
 
 def test_sha256_is_stable():

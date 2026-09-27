@@ -135,19 +135,55 @@ def _squash(value: str) -> str:
     return _NON_ALNUM.sub("", value).upper()
 
 
+def _accounts_named_in(haystack: str, registry: Registry) -> list[str]:
+    """Every registry account whose IBAN, number or wallet appears in `haystack`."""
+    hits: list[str] = []
+    for account in registry.accounts:
+        for identifier in (account.iban, account.account_number, account.wallet_number):
+            if identifier and _squash(identifier) in haystack:
+                hits.append(account.id)
+                break
+    return hits
+
+
 def resolve_account(
     summary: DocumentSummary, text: str, registry: Registry
 ) -> str | None:
     """Link a statement to a registry account by IBAN, number or wallet.
 
+    Spec §4.2: a statement is linked "by matching its **printed account
+    identifier**". The printed identifier is therefore tried on its own
+    first, and body text only when it names no account at all.
+
+    Squashing the whole file - the printed identifier plus 30 rows of
+    transaction descriptions - into one haystack and returning the first
+    registry account found anywhere in it is how this used to work, and it
+    misattributes a whole statement: a Meezan CSV printing the Meezan IBAN,
+    with a description reading "Raast P2P Fund transfer to 0300 1234567",
+    resolved to the WALLET that owns 03001234567 whenever that wallet was
+    declared first in accounts.toml. Every Meezan transaction was then
+    booked to the wallet, the wallet's 30 June balance became Meezan's, and
+    meezan-main vanished from the Checks page with nothing warning about it.
+
+    More than one match returns None rather than picking one. An unassigned
+    file is reported to the owner and is recoverable on the Load page; a
+    wrongly attributed one produces confident, wrong figures instead.
+
     Comparison ignores spacing and case, because statements print IBANs
     grouped in fours as often as not.
     """
-    haystack = _squash(f"{summary.account_identifier or ''} {text}")
-    if not haystack:
+    printed = _squash(summary.account_identifier or "")
+    if printed:
+        hits = _accounts_named_in(printed, registry)
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            # The printed identifier is the authority, and it is ambiguous.
+            # Reading on into the body text could only contradict it.
+            return None
+
+    body = _squash(text or "")
+    if not body:
         return None
-    for account in registry.accounts:
-        for identifier in (account.iban, account.account_number, account.wallet_number):
-            if identifier and _squash(identifier) in haystack:
-                return account.id
-    return None
+    hits = _accounts_named_in(body, registry)
+    return hits[0] if len(hits) == 1 else None
