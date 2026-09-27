@@ -11,7 +11,6 @@ statement that cannot be read is information the owner needs, not a crash.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from fbr import paths
 from fbr.config.loader import ProfileSet
