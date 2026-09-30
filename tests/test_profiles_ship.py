@@ -125,7 +125,67 @@ def test_thresholds_are_in_paisa():
     assert ty.thresholds.profit_final_regime_max == 500_000_000   # Rs 5,000,000
 
 
+# Profiles written against a synthetic fixture only. Their VERIFY markers are
+# the sole record of what the owner still has to confirm against a real export,
+# so the markers themselves are shipped behaviour and are tested as such.
+SYNTHETIC_PROFILES = ("meezan.csv.v1", "mcb.csv.v1", "nayapay.csv.v1",
+                      "sadapay.pdf.v1")
+
+
 def test_profiles_mark_values_that_a_real_dump_must_confirm():
-    for name in ("meezan.csv.v1", "mcb.csv.v1", "nayapay.csv.v1"):
+    # sadapay.pdf.v1 was the omission that mattered: it is the profile written
+    # ENTIRELY against tests/fixtures/synth_pdf.py, and its 11 markers are what
+    # tell the owner which of its settings are still guesses.
+    for name in SYNTHETIC_PROFILES:
         text = (ROOT / "profiles" / f"{name}.toml").read_text()
         assert "VERIFY" in text, f"{name} must flag values awaiting a real dump"
+
+
+@pytest.mark.parametrize("name", SYNTHETIC_PROFILES)
+def test_a_synthetic_profile_marks_every_decisive_setting(name):
+    """Each setting that decides a FIGURE must carry its own VERIFY marker.
+
+    "VERIFY appears somewhere in the file" is too weak: a marker on a comment
+    line would satisfy it while the amount column, the date format or a summary
+    pattern silently went unflagged. These are the settings that put a number
+    on a return, so each one is checked on its own line.
+    """
+    text = (ROOT / "profiles" / f"{name}.toml").read_text()
+    # Every setting the file actually makes, keyed EXACTLY (so `debit_tokens`
+    # never passes for `debit`), paired with whether its line is marked. A key
+    # that appears twice - `amount` is both a column and a [columns.align]
+    # entry - must be marked on EVERY line: ORing let the align marker rescue
+    # an unmarked amount column, which is the setting that decides the figure.
+    marked: dict[str, bool] = {}
+    for line in text.splitlines():
+        if line.lstrip().startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        marked[key] = marked.get(key, True) and "VERIFY" in line
+
+    # Settings that decide a figure. Only those the profile actually sets are
+    # required to be marked - SadaPay has no balance column, MCB no value_date.
+    DECISIVE = {"header_contains", "date", "value_date", "description",
+                "reference", "amount", "debit", "credit", "balance", "type",
+                "dates", "debit_tokens", "credit_tokens", "opening", "closing",
+                "total_credit", "total_debit", "period_from", "period_to"}
+    missing = sorted(k for k in DECISIVE & marked.keys() if not marked[k])
+    assert not missing, (
+        f"{name} sets {missing} without a # VERIFY marker; a setting written "
+        "against a synthetic fixture and not flagged is a guess the owner "
+        "cannot see"
+    )
+
+
+def test_a_profile_with_no_verify_markers_cites_the_real_dump_it_came_from(shipped):
+    """The only excuse for carrying no markers is having been written from a
+    real `fbr-dump`. This keeps the two XLSX profiles' exemption explicit, so a
+    future unflagged profile cannot inherit it by silence."""
+    for profile in shipped.profiles:
+        text = (ROOT / "profiles" / f"{profile.id}.toml").read_text()
+        if "VERIFY" in text:
+            continue
+        assert "fbr-dump" in text, (
+            f"{profile.id} carries no # VERIFY markers and does not say it was "
+            "written from a real fbr-dump; one or the other must be true"
+        )
