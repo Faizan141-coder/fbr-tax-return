@@ -171,18 +171,19 @@ resolution has something real to work against.
 The `unassigned` messages said "choose one on the Load page", and
 `app/pages/2_Load.py` has no account picker.
 
-**Chosen: change the messages, not the page.** Spec §4.2 does call for that
-picker ("If nothing matches, the owner picks the account on the Load page"), so
-this is a gap, not a design decision — and the first wording I wrote justified
-its absence as deliberate, which was wrong. It now says plainly that the picker
-is spec and unbuilt, in the Load page warning and in `resolve_account`'s
-docstring, and every message points at the control that does work. I did not
-build the picker in this pass: it is untestable from here (no browser), and this
-brief's contract is reproduce-fix-confirm by execution. **Flagged as follow-up
-work.**
+**Resolved by building the picker — see the Picker section at the end of this
+report.** The route taken here, in order:
 
-With half one in place, the accounts.toml advice is now actually actionable for a
-PDF, which it never was before.
+1. First pass: changed the messages to point at `accounts.toml` only, and
+   justified the picker's absence in the UI copy as a deliberate design choice.
+   That was wrong — spec §4.2 requires the picker, so its absence was a gap.
+2. `4b6ce21`: removed that invented rationale and said plainly that the picker
+   is spec and unbuilt, rather than quietly reframing a gap as a decision.
+3. On the coordinator's ruling: built it. The messages now name both routes, both
+   of which exist.
+
+With half one in place, the `accounts.toml` route is also genuinely actionable for
+a PDF for the first time — the printed identifier is now actually searched.
 
 ### After
 
@@ -416,11 +417,8 @@ this replaced.
 
 ## Follow-up raised by this pass
 
-- **Spec §4.2's Load page account picker does not exist.** The messages no
-  longer promise it and say so, but the gap is real and now explicit in the UI
-  copy. Building it needs a session-state round trip (`InputFile.account_id`
-  already carries the override end to end, and `load_files` already validates an
-  unknown id back into `unassigned`), plus a way to exercise a Streamlit page.
+- **Spec §4.2's Load page account picker — CLOSED.** Built on the coordinator's
+  ruling; see the Picker section at the end of this report.
 
 ## Verification
 
@@ -431,3 +429,134 @@ uv run pytest        ->  423 passed
 405 before, 423 after: 18 new tests. CPython 3.14 via `uv run` throughout; money
 compared as integer paisa with no tolerance anywhere; fake identifiers use the
 `PK00TEST` prefix only; no password reaches a message, a log or a command line.
+
+---
+
+## Picker — spec §4.2's Load page account picker, built
+
+Commit: see below. Ruling received: do not ship the gap. Built as UI plus one
+testable seam; `_bands.assign` left untouched, history left unamended.
+
+### What was built
+
+**`pipeline.load_files_with_assignments(files, assignments, *, registry,
+profiles, tax_year, anchors=None, prior_year=None)`** — the whole rule, in
+`src/fbr/pipeline.py`, so the page holds no business logic. It applies the
+owner's chosen `account_id` to each file by name and re-runs `load_files` over
+the **whole** set.
+
+Re-running rather than merging the new ledger onto the previous `RunResult` is
+not a shortcut, it is the only correct option: `merge_account` has to see every
+one of an account's statements at once to check them for overlapping periods, a
+balance discontinuity where two statements meet, and days of the tax year none of
+them covers. Stitching one late ledger on afterwards would skip all three for
+the very file the owner just assigned. Re-running is also what makes the
+coordinator's second requirement hold structurally — every already-assigned file
+parses identically, so its ledger comes back unchanged and a bad assignment
+cannot cost the owner a good parse.
+
+Two edges, both documented at the seam and tested:
+- an assignment naming a file no longer loaded is inert (the owner removed the
+  file after choosing; a stale key must not break the next parse);
+- an assignment naming no registry account is not re-validated here, because
+  `load_files` already routes an unknown id straight back to `unassigned` with
+  the message the owner needs — the same fail-closed path.
+
+**`app/pages/2_Load.py`** — one selectbox per unassigned file, options
+`[— leave unassigned —, <id> — <institution>, …]`, defaulting to leaving it
+alone so nothing is assigned by accident. "Parse again with these accounts" is
+disabled until something is picked. Choices go in
+`st.session_state["account_assignments"]`, never `st.cache_data`, and every
+parse — including the plain **Parse** button — goes through one `parse_now`
+helper, so a choice does not have to be made twice. A password is attached per
+run inside the `InputFile` and is never written to session state.
+
+**Messages, third and final revision.** Both now name two routes that exist:
+"no registry account matches this statement; choose its account on the Load page,
+or add the IBAN, account number or wallet number it prints to that account in
+accounts.toml". `resolve_account`'s docstring points at the picker by name. The
+"not built yet" wording from `4b6ce21` is gone.
+
+### Verified by execution
+
+The page itself was driven through `streamlit.testing.v1.AppTest`, in-process, no
+browser. Two statements in the private folder: `meezan.csv` printing an IBAN a
+registry account holds, and `sada.pdf` printing `PK00TEST9999999999999999`, which
+no account holds — the case the picker exists for.
+
+```
+--- after Parse ---
+warning:      1 file(s) matched no account: `sada.pdf`. Each statement is normally …
+selectboxes:  ('Account for `sada.pdf`',
+               ['— leave unassigned —', 'meezan-main — Meezan Bank Limited',
+                'sadapay — SadaPay'])
+buttons:      [('Parse', False), ('Parse again with these accounts', True)]   # disabled
+ledgers:      ['meezan-main']
+unassigned:   ['sada.pdf']
+
+--- after picking "sadapay" ---
+buttons:      [('Parse', False), ('Parse again with these accounts', False)]  # enabled
+
+--- after re-parse ---
+exception:    ElementList()                      # none
+assignments:  {'sada.pdf': 'sadapay'}
+ledgers:      ['meezan-main', 'sadapay']
+unassigned:   []
+  meezan-main: status=complete   txns=2  closing=130000
+  sadapay:     status=incomplete txns=2  closing=None
+session keys: ['account_assignments', 'profiles', 'registry', 'run',
+               'tax_year', 'tax_year_config']
+```
+
+`meezan-main` came back byte-identical to the pre-assignment run — 2
+transactions, closing 130000 paisa (Rs 1,300.00) — which is the "must not lose a
+good parse" requirement, measured.
+
+`sadapay: status=incomplete, closing=None` is correct, not a picker defect: the
+page passes no `anchor`, and a layout with no balance column has no boundary
+balance without one, so `anchor_missing` warns rather than a figure being
+invented. Assignment worked; the missing anchor is reported.
+
+At the seam, integer paisa, exact: with `anchors={"sadapay": 500000}` the
+assigned ledger closes at **510000 paisa** — anchor Rs 5,000.00 + Rs 300.00 −
+Rs 200.00 = Rs 5,100.00 — with `opening_source == "anchor"`.
+
+### Tests
+
+`tests/test_pipeline.py` (the seam, no Streamlit)
+- `test_an_owner_assignment_produces_a_ledger_and_keeps_the_existing_ones` — the
+  test the ruling asked for: the chosen account gets a ledger, and
+  `meezan-main`'s ledger, transactions and status are unchanged
+- `test_an_assignment_for_a_file_no_longer_loaded_does_not_break_the_parse`
+- `test_an_assignment_naming_no_registry_account_fails_closed`
+- `test_no_assignments_is_exactly_load_files`
+
+`tests/test_load_page.py` (new; the page, via `AppTest`, `importorskip`-guarded)
+- `test_the_picker_offers_every_account_and_defaults_to_leaving_it_alone`
+- `test_choosing_an_account_assigns_the_file_and_keeps_the_good_ledger`
+- `test_a_remembered_choice_still_applies_on_a_plain_re_parse`
+- `test_the_page_stores_only_the_run_and_the_assignments`
+
+`tests/test_pdf_wiring.py` — the two message tests were rewritten, since the
+messages should now name the Load page:
+`test_an_unassignable_pdf_names_both_routes_the_owner_actually_has`,
+`test_an_unknown_explicit_account_id_names_both_routes`.
+
+Exact output:
+
+```
+tests/test_load_page.py::test_the_picker_offers_every_account_and_defaults_to_leaving_it_alone PASSED
+tests/test_load_page.py::test_choosing_an_account_assigns_the_file_and_keeps_the_good_ledger PASSED
+tests/test_load_page.py::test_a_remembered_choice_still_applies_on_a_plain_re_parse PASSED
+tests/test_load_page.py::test_the_page_stores_only_the_run_and_the_assignments PASSED
+tests/test_pipeline.py::test_an_owner_assignment_produces_a_ledger_and_keeps_the_existing_ones PASSED
+tests/test_pipeline.py::test_an_assignment_for_a_file_no_longer_loaded_does_not_break_the_parse PASSED
+tests/test_pipeline.py::test_an_assignment_naming_no_registry_account_fails_closed PASSED
+tests/test_pipeline.py::test_no_assignments_is_exactly_load_files PASSED
+
+$ uv run pytest
+431 passed in 6.67s
+```
+
+405 at `344af41` → 431 now: 26 new tests. The §4.2 follow-up recorded earlier in
+this report is closed.

@@ -7,7 +7,7 @@ import streamlit as st
 
 from app.state import summarize_run
 from fbr import paths
-from fbr.pipeline import InputFile, load_files, read_statement_dir
+from fbr.pipeline import InputFile, load_files_with_assignments, read_statement_dir
 
 st.header("Load statements")
 
@@ -67,14 +67,33 @@ if pdf_names:
     if shared:
         passwords = {name: shared for name in pdf_names}
 
-if files and st.button("Parse", type="primary"):
-    files = [
+
+def parse_now(file_list: list[InputFile]) -> None:
+    """Run the pipeline over `file_list` and keep the result for this session.
+
+    Every parse goes through here, including the one the account picker below
+    triggers, so the owner's account choices are applied on a plain re-parse
+    too and do not have to be made twice. The rule itself is
+    `pipeline.load_files_with_assignments`; this page only collects the
+    choices, because the pages hold no business logic.
+
+    A password is attached here, per run, and lives only in the InputFile it is
+    attached to. It is deliberately NOT kept in st.session_state.
+    """
+    prepared = [
         InputFile(f.name, f.data, account_id=f.account_id,
                   password=passwords.get(f.name))
-        for f in files
+        for f in file_list
     ]
-    run = load_files(files, registry=registry, profiles=profiles, tax_year=ty_config)
-    st.session_state["run"] = run
+    st.session_state["run"] = load_files_with_assignments(
+        prepared,
+        st.session_state.get("account_assignments", {}),
+        registry=registry, profiles=profiles, tax_year=ty_config,
+    )
+
+
+if files and st.button("Parse", type="primary"):
+    parse_now(files)
 
 run = st.session_state.get("run")
 if run:
@@ -102,16 +121,56 @@ if run:
     )
 
     if run.unassigned:
-        # Spec §4.2 says the owner picks the account here when nothing matches.
-        # That picker is not built yet, and the per-file messages in `outcomes`
-        # above used to promise it anyway - which sent the owner looking for a
-        # control that is not on this page. Until it exists, both the messages
-        # and this warning name the one thing that does work. Keep them in step.
+        # Spec §4.2's account picker. A statement is normally linked by the
+        # identifier it prints; when the owner's real statement prints one in a
+        # form no profile anticipated, this is the route that does not require
+        # editing accounts.toml and re-running on a guess. The per-file messages
+        # in `outcomes` above name both routes, and so does this block - keep
+        # the three in step.
+        st.subheader("Files that matched no account")
         st.warning(
             f"{len(run.unassigned)} file(s) matched no account: "
             + ", ".join(f"`{f.name}`" for f in run.unassigned)
-            + ". Each statement is linked by the IBAN, account number or "
-            "wallet number it prints. Add that identifier to the matching "
-            "account in `accounts.toml`, then parse again. (Picking the "
-            "account here instead is spec §4.2 and is not built yet.)"
+            + ". Each statement is normally linked by the IBAN, account number "
+            "or wallet number it prints. Choose the account below, or add that "
+            "identifier to the matching account in `accounts.toml` so the file "
+            "matches on its own next time."
         )
+
+        LEAVE = "— leave unassigned —"
+
+        def describe(value: str) -> str:
+            account = registry.by_id(value)
+            return f"{value} — {account.institution}" if account else value
+
+        # Default to leaving it alone. Nothing is assigned by accident, and a
+        # statement booked to the wrong account produces confident, wrong
+        # figures that no downstream check can catch.
+        chosen: dict[str, str] = {}
+        for f in run.unassigned:
+            picked = st.selectbox(
+                f"Account for `{f.name}`",
+                [LEAVE, *(a.id for a in registry.accounts)],
+                format_func=describe,
+                key=f"account_for:{f.name}",
+            )
+            if picked != LEAVE:
+                chosen[f.name] = picked
+
+        if not files:
+            st.caption(
+                "Re-select the files above to apply an assignment: the bytes "
+                "are read fresh on every parse and are never cached."
+            )
+        elif st.button("Parse again with these accounts", disabled=not chosen):
+            # Session state, not st.cache_data: a choice belongs to this owner's
+            # session and must never outlive it or be shared across runs.
+            st.session_state["account_assignments"] = {
+                **st.session_state.get("account_assignments", {}),
+                **chosen,
+            }
+            # The WHOLE set is re-parsed, so the files that already resolved keep
+            # their ledgers - see load_files_with_assignments for why merging
+            # afterwards would be wrong.
+            parse_now(files)
+            st.rerun()

@@ -360,3 +360,137 @@ def test_read_statement_dir_returns_files(tmp_path, monkeypatch):
     (folder / "notes.txt").write_text("ignored")
     files = read_statement_dir("TY2026")
     assert [f.name for f in files] == ["a.csv"]
+
+
+# --- spec 4.2: the owner assigns a file the registry could not match --------
+
+
+def _wallet_registry():
+    """meezan-main matches the CSV's printed IBAN; sadapay matches nothing.
+
+    The SadaPay statement below prints an IBAN that is in no registry account,
+    so it lands in `unassigned` exactly as a real first statement printing an
+    unanticipated identifier would - which is the case the picker exists for.
+    """
+    return Registry(
+        owner=Owner(name="OWNER NAME"),
+        accounts=(
+            Account(id="meezan-main", institution="Meezan Bank Limited", kind="bank",
+                    iban="PK00TEST0000000000000000", account_number="", wallet_number="",
+                    title="ACCOUNT TITLE", type="Saving", ownership="Self",
+                    currency="PKR", statement_expected=True, match_hints=("MEEZAN",)),
+            Account(id="sadapay", institution="SadaPay", kind="wallet", iban="",
+                    account_number="", wallet_number="03009999999",
+                    title="ACCOUNT TITLE", type="", ownership="Self", currency="PKR",
+                    statement_expected=True, match_hints=("SADA",)),
+        ),
+    )
+
+
+def _two_files():
+    """A CSV that resolves on its own, and a PDF that cannot."""
+    from tests.fixtures.synth_pdf import write_sadapay_pdf
+
+    sada = build_statement(
+        opening=0, start=date(2025, 7, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2025, 9, 1), "Top-up", 30000, None),
+              SynthTxn(date(2026, 3, 1), "POS Transaction", -20000, None)],
+        account_id="PK00TEST9999999999999999",     # in no registry account
+    )
+    return (
+        [InputFile("meezan.csv", write_meezan_csv(_full_year())),
+         InputFile("sada.pdf", write_sadapay_pdf(sada))],
+        sada,
+    )
+
+
+def test_an_owner_assignment_produces_a_ledger_and_keeps_the_existing_ones(ty, profiles):
+    """Spec 4.2, the whole rule, without a browser.
+
+    The picker's job: assign the file the registry could not match, and do not
+    cost the owner the parse that already worked. Re-running the WHOLE set is
+    what guarantees the second half - see load_files_with_assignments.
+    """
+    from fbr.pipeline import load_files_with_assignments
+
+    reg = _wallet_registry()
+    files, sada = _two_files()
+
+    # Before: the CSV resolved itself, the PDF did not.
+    first = load_files(files, registry=reg, profiles=profiles, tax_year=ty)
+    assert {o.name: o.status for o in first.outcomes} == {
+        "meezan.csv": "ok", "sada.pdf": "unassigned",
+    }
+    assert [f.name for f in first.unassigned] == ["sada.pdf"]
+    assert set(first.ledgers) == {"meezan-main"}
+    meezan_before = first.ledgers["meezan-main"]
+
+    # The owner picks "sadapay" for sada.pdf and parses again.
+    second = load_files_with_assignments(
+        files, {"sada.pdf": "sadapay"},
+        registry=reg, profiles=profiles, tax_year=ty,
+        anchors={"sadapay": 500000},
+    )
+
+    # The assigned file now has a ledger of its own...
+    assert second.unassigned == ()
+    assert {o.name: o.status for o in second.outcomes} == {
+        "meezan.csv": "ok", "sada.pdf": "ok",
+    }
+    assert set(second.ledgers) == {"meezan-main", "sadapay"}
+    sadapay = second.ledgers["sadapay"]
+    assert len(sadapay.transactions) == len(sada.txns)
+    # Integer paisa, exact: anchor 5,000.00 + 300.00 - 200.00 = 5,100.00.
+    assert sadapay.closing == 510000
+    assert sadapay.opening == 500000 and sadapay.opening_source == "anchor"
+
+    # ...and the ledger that already worked came back untouched.
+    assert second.ledgers["meezan-main"].closing == meezan_before.closing
+    assert second.ledgers["meezan-main"].transactions == meezan_before.transactions
+    assert second.ledgers["meezan-main"].status == meezan_before.status
+
+
+def test_an_assignment_for_a_file_no_longer_loaded_does_not_break_the_parse(
+    ty, profiles
+):
+    """A stale choice - the owner removed the file after picking - is inert."""
+    from fbr.pipeline import load_files_with_assignments
+
+    reg = _wallet_registry()
+    run = load_files_with_assignments(
+        [InputFile("meezan.csv", write_meezan_csv(_full_year()))],
+        {"a-file-that-is-gone.pdf": "sadapay"},
+        registry=reg, profiles=profiles, tax_year=ty,
+    )
+    assert run.outcomes[0].status == "ok"
+    assert set(run.ledgers) == {"meezan-main"}
+
+
+def test_an_assignment_naming_no_registry_account_fails_closed(ty, profiles):
+    """The picker only offers real ids, but the seam must not trust that."""
+    from fbr.pipeline import load_files_with_assignments
+
+    files, _ = _two_files()
+    run = load_files_with_assignments(
+        files, {"sada.pdf": "not-an-account"},
+        registry=_wallet_registry(), profiles=profiles, tax_year=ty,
+    )
+    sada = next(o for o in run.outcomes if o.name == "sada.pdf")
+    assert sada.status == "unassigned"
+    assert "not-an-account" in sada.message
+    # And the good file still parsed.
+    assert set(run.ledgers) == {"meezan-main"}
+
+
+def test_no_assignments_is_exactly_load_files(ty, profiles):
+    """The helper must not change behaviour when the owner has chosen nothing."""
+    from fbr.pipeline import load_files_with_assignments
+
+    reg = _wallet_registry()
+    files, _ = _two_files()
+    plain = load_files(files, registry=reg, profiles=profiles, tax_year=ty)
+    same = load_files_with_assignments(files, {}, registry=reg, profiles=profiles,
+                                       tax_year=ty)
+    assert [(o.name, o.status, o.account_id) for o in same.outcomes] == \
+           [(o.name, o.status, o.account_id) for o in plain.outcomes]
+    assert set(same.ledgers) == set(plain.ledgers)

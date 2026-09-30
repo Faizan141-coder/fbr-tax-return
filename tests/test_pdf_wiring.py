@@ -158,8 +158,14 @@ def test_an_encrypted_pdf_resolves_its_account_too(shipped, registry, ty):
     assert "s3cret" not in outcome.message
 
 
-def test_an_unassignable_pdf_is_told_what_it_can_actually_do(shipped, ty):
-    """The message must not name a control the Load page does not have."""
+def test_an_unassignable_pdf_names_both_routes_the_owner_actually_has(shipped, ty):
+    """Every control the message names must exist.
+
+    It spent a release saying "choose one on the Load page" when that page had
+    no picker. Both routes it now names are real: the Load page picker is
+    pipeline.load_files_with_assignments, exercised below, and accounts.toml is
+    searched for a PDF's printed identifier now that _free_text extracts text.
+    """
     empty = Registry(
         owner=Owner(name="OWNER NAME"),
         accounts=(Account(
@@ -169,26 +175,22 @@ def test_an_unassignable_pdf_is_told_what_it_can_actually_do(shipped, ty):
             currency="PKR", statement_expected=False, match_hints=()),),
     )
     stmt = build_statement(seed=236, start=date(2025, 7, 1), end=date(2026, 6, 30),
-                           account_id="PK00TEST0000000000000000")
+                           account_id=TEST_IBAN)
     run = load_files([InputFile("sada.pdf", write_sadapay_pdf(stmt))],
                      registry=empty, profiles=shipped, tax_year=ty)
     message = run.outcomes[0].message
     assert run.outcomes[0].status == "unassigned"
-    assert "Load page" not in message
-    assert "accounts.toml" in message
+    assert "Load page" in message and "accounts.toml" in message
 
 
-def test_an_unknown_explicit_account_id_is_told_what_it_can_actually_do(
-    shipped, registry, ty
-):
+def test_an_unknown_explicit_account_id_names_both_routes(shipped, registry, ty):
     run = load_files([InputFile("sada.pdf",
                                 write_sadapay_pdf(build_statement(seed=237)),
                                 account_id="no-such-account")],
                      registry=registry, profiles=shipped, tax_year=ty)
     message = run.outcomes[0].message
     assert run.outcomes[0].status == "unassigned"
-    assert "Load page" not in message
-    assert "accounts.toml" in message
+    assert "Load page" in message and "accounts.toml" in message
 
 
 def test_a_pdf_is_no_longer_reported_unsupported(shipped, registry, ty):

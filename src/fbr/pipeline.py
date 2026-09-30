@@ -10,7 +10,7 @@ statement that cannot be read is information the owner needs, not a crash.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from fbr import paths
 from fbr.config.loader import ProfileSet
@@ -191,8 +191,9 @@ def load_files(
             unassigned.append(item)
             outcomes.append(FileOutcome(
                 item.name, digest, "unassigned", profile.id, None,
-                f"{account_id!r} is not a known registry account id; it must "
-                "match an account's `id` in accounts.toml", 0,
+                f"{account_id!r} is not a known registry account id; choose "
+                "this file's account on the Load page, or correct the id in "
+                "accounts.toml", 0,
             ))
             continue
 
@@ -213,15 +214,16 @@ def load_files(
 
         if account_id is None:
             unassigned.append(item)
-            # The message names the ONE thing the owner can actually do. It used
-            # to say "choose one on the Load page", and that page has no account
-            # picker - only a warning pointing at accounts.toml. A message
-            # naming a control that does not exist is worse than a blunt one.
+            # Both routes the owner actually has, in the order they will want
+            # them: pick the account now, or teach the registry to match this
+            # statement by itself next time. This message spent a release naming
+            # a Load page picker that did not exist; it does now
+            # (load_files_with_assignments, spec 4.2).
             outcomes.append(FileOutcome(
                 item.name, digest, "unassigned", profile.id, None,
-                "no registry account matches this statement; add the IBAN, "
-                "account number or wallet number it prints to that account in "
-                "accounts.toml, then parse again", 0,
+                "no registry account matches this statement; choose its account "
+                "on the Load page, or add the IBAN, account number or wallet "
+                "number it prints to that account in accounts.toml", 0,
             ))
             continue
 
@@ -300,4 +302,53 @@ def load_files(
         all_checks=tuple(checks),
         unassigned=tuple(unassigned),
         missing_accounts=tuple(missing),
+    )
+
+
+def load_files_with_assignments(
+    files: list[InputFile],
+    assignments: dict[str, str],
+    *,
+    registry: Registry,
+    profiles: ProfileSet,
+    tax_year: TaxYear,
+    anchors: dict[str, int] | None = None,
+    prior_year: dict[str, int] | None = None,
+) -> RunResult:
+    """`load_files`, with the owner's own account choices applied by file name.
+
+    Spec §4.2: a statement is linked to an account by its printed identifier,
+    "and if nothing matches, the owner picks the account on the Load page".
+    This is that rule. It lives here rather than in the page because the
+    Streamlit pages hold no business logic - which also makes the whole of it
+    testable without a browser.
+
+    The WHOLE set is re-run, and the newly assigned file's ledger is NOT
+    stitched onto the previous `RunResult`. That is the only correct way to do
+    it: `merge_account` has to see every one of an account's statements at once
+    to check them for overlapping periods, a balance discontinuity where two
+    statements meet, and days of the tax year that none of them covers. Adding
+    one late statement by merging ledgers afterwards would skip all three for
+    the very file the owner just assigned. Re-running is also what keeps a good
+    parse safe: every already-assigned file parses identically and its ledger
+    comes back unchanged, so assigning one file badly cannot cost the owner the
+    rest of the run.
+
+    An assignment naming a file that is no longer loaded simply does not apply -
+    the owner removed the file after choosing it, and a stale choice must not
+    break the next parse. An assignment naming no registry account is not
+    rejected here either: `load_files` already routes such an id straight back
+    to `unassigned` with a message saying so, which is the same fail-closed path
+    and the same message the owner needs to act on.
+    """
+    return load_files(
+        [
+            replace(item, account_id=assignments.get(item.name, item.account_id))
+            for item in files
+        ],
+        registry=registry,
+        profiles=profiles,
+        tax_year=tax_year,
+        anchors=anchors,
+        prior_year=prior_year,
     )
