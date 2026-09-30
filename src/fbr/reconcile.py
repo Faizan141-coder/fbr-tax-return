@@ -154,14 +154,24 @@ def _check_nothing_verified(amount_checks: dict[str, Check | None]) -> Check | N
         f"{kind} {'absent' if check is None else check.status}"
         for kind, check in amount_checks.items()
     )
+    # One of the three CAN have failed rather than been absent: then a check
+    # did run, it just did not verify anything, and saying "could not be run"
+    # would be wrong. Both cases are the same verdict, so only the wording moves.
+    ran_and_failed = any(
+        c is not None and c.status == "fail" for c in amount_checks.values()
+    )
+    lead = (
+        "not one arithmetic check confirmed this statement's amounts"
+        if ran_and_failed else
+        "no arithmetic check could be run against this statement"
+    )
     return _check(
         "nothing_verified", "fail",
         "running_balance, opening_closing or printed_totals to pass",
         "none of them did",
-        "no arithmetic check could be run against this statement, so nothing "
-        f"confirms the figures parsed out of it ({states}). A layout that "
-        "prints no running balance can only be proved by its own printed "
-        "totals or opening/closing balances: check that this profile's "
+        f"{lead}, so nothing confirms the figures parsed out of it ({states}). "
+        "A layout that prints no running balance can only be proved by its own "
+        "printed totals or opening/closing balances: check that this profile's "
         "[summary] patterns match the statement's exact wording (run "
         "`fbr-dump` on it), or use a statement that prints them.",
     )
