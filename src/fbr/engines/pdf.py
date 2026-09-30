@@ -179,6 +179,12 @@ def _rows_from_pdf(
     summary_res = [re.compile(p) for p in profile.rows.summary]
     footer_res = [re.compile(p) for p in profile.rows.footer]
 
+    def is_furniture(text: str) -> bool:
+        """A line a profile has already told us carries no transaction."""
+        return (any(r.search(text) for r in skip_res)
+                or any(r.search(text) for r in summary_res)
+                or any(r.search(text) for r in footer_res))
+
     staged: list[dict] = []
     unresolved: list[UnresolvedRow] = []
     preamble_parts: list[str] = []
@@ -215,9 +221,37 @@ def _rows_from_pdf(
                 continue          # a cover page before any header
             body = lines
 
-        for line in body:
+        for index, line in enumerate(body):
             raw = " ".join(w.text for w in line)
             if any(r.search(raw) for r in footer_res):
+                # A footer ends the page - but ONLY if nothing that could be a
+                # transaction follows it. `break` alone silently discarded every
+                # row below the match, and sadapay.pdf.v1's own footer pattern
+                # '(?i)^\s*page\s+\d+' matches a "Page 2 of 2" line printed at
+                # the TOP of a continuation page. Measured: a two-page statement
+                # parsed 1 of 2 rows, reported a net of Rs 300.00 where the truth
+                # was Rs 100.00, and raised no UnresolvedRow and no failing
+                # check. Money must never leave this engine unannounced, so a
+                # footer with body lines still after it fails the statement
+                # instead. Lines the profile itself classes as furniture (skip,
+                # summary or another footer match) do not count: a real footer
+                # followed by a page number or a disclaimer the profile lists is
+                # the ordinary end of a page.
+                following = [
+                    " ".join(w.text for w in l) for l in body[index + 1:]
+                ]
+                orphaned = [t for t in following if not is_furniture(t)]
+                if orphaned:
+                    unresolved.append(UnresolvedRow(
+                        f"page:{page_no},y:{round(line[0].top)}", raw,
+                        f"a rows.footer pattern matched this line, but "
+                        f"{len(orphaned)} line(s) follow it on page {page_no}; "
+                        "ending the page here would discard them without a "
+                        "trace, so the statement is refused instead - tighten "
+                        "the footer pattern so it matches only the real end of "
+                        "a page",
+                    ))
+                    open_row = None
                 break
             if any(r.search(raw) for r in skip_res) or any(
                 r.search(raw) for r in summary_res

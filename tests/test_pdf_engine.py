@@ -17,6 +17,7 @@ from tests.fixtures.synth import SynthTxn, build_statement
 from tests.fixtures.synth_pdf import (
     encrypt_pdf,
     write_meezan_pdf,
+    write_sadapay_paged_pdf,
     write_sadapay_pdf,
     write_wrapped_description_pdf,
 )
@@ -234,6 +235,50 @@ def test_a_footer_line_is_not_a_transaction():
     res = _parse(write_sadapay_pdf(stmt), SADAPAY)
     assert not any("system generated" in t.description.lower()
                    for t in res.transactions)
+
+
+# The shipped sadapay.pdf.v1 footer list, which includes the page-number
+# pattern that a "Page 2 of 2" banner at the TOP of a continuation page matches.
+SADAPAY_PAGED = SADAPAY.model_copy(update={
+    "rows": SADAPAY.rows.model_copy(update={
+        "footer": [r"(?i)system\s+generated", r"(?i)^\s*page\s+\d+"],
+    }),
+})
+
+
+def test_a_page_banner_above_real_rows_does_not_lose_them_silently():
+    """`break` on a footer match discarded every row below it without a trace.
+
+    Measured before the fix: 1 of 2 transactions, a net of Rs 300.00 where the
+    truth was Rs 100.00, zero unresolved rows and every check pass or warn.
+    """
+    stmt = build_statement(
+        opening=0, start=date(2025, 7, 1), end=date(2026, 6, 30),
+        rows=[SynthTxn(date(2025, 7, 2), "Top-up", 30000, None),
+              SynthTxn(date(2025, 8, 3), "POS Transaction STAN 222333", -20000, None)],
+    )
+    res = _parse(write_sadapay_paged_pdf(stmt, rows_on_first_page=1), SADAPAY_PAGED)
+
+    # Either the rows survive, or their loss is announced. Silence is the bug.
+    parsed_net = sum(t.amount for t in res.transactions)
+    if len(res.transactions) < len(stmt.txns):
+        assert res.unresolved, (
+            f"{len(stmt.txns) - len(res.transactions)} row(s) vanished with no "
+            f"UnresolvedRow; net {parsed_net} vs truth 10000"
+        )
+    checks = check_statement(res, SADAPAY_PAGED)
+    assert statement_usable(checks) is False
+    assert "unresolved_rows" in {c.kind for c in checks if c.status == "fail"}
+    reason = res.unresolved[0].reason
+    assert "rows.footer" in reason and "Page 2 of 2" in res.unresolved[0].raw
+
+
+def test_a_real_footer_with_nothing_after_it_still_just_ends_the_page():
+    """The ordinary case must not become an unresolved row."""
+    stmt = build_statement(seed=161, count=6)
+    res = _parse(write_sadapay_pdf(stmt), SADAPAY_PAGED)
+    assert res.unresolved == ()
+    assert len(res.transactions) == len(stmt.txns)
 
 
 def test_a_wrapped_description_is_joined_onto_its_row():

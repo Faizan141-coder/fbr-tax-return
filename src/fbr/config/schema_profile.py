@@ -106,6 +106,28 @@ class Formats(BaseModel):
 
 
 class Rows(BaseModel):
+    """Which printed lines are transactions and which are furniture.
+
+    `skip` and `summary` are read by BOTH engines: a line matching either is
+    passed over wherever it appears.
+
+    `footer` is read by the PDF engine ONLY, and it means "the end of this
+    page's body" - the PDF engine stops reading the page there. The tabular
+    engine has no pages and does not read it at all; on a CSV or XLSX the
+    equivalent trailing lines belong in `skip` or `summary`. That divergence
+    used to be silent, so the same key meant two different things depending on
+    the container; `Profile` now refuses `footer` on a non-PDF profile rather
+    than accepting a setting nothing honours.
+
+    Note for the next PDF profile author: a `footer` pattern is not a "skip
+    anywhere" rule. It ends the page, so a pattern loose enough to match a line
+    printed ABOVE real rows - `'(?i)^\\s*page\\s+\\d+'` against a "Page 2 of 2"
+    banner at the top of a continuation page - would end the page before them.
+    The engine will not drop them silently: it raises an UnresolvedRow naming
+    the footer line and fails the statement. Tighten the pattern, or move it to
+    `skip`.
+    """
+
     model_config = _STRICT
     skip: list[str] = Field(default_factory=list)
     summary: list[str] = Field(default_factory=list)
@@ -283,6 +305,22 @@ class Profile(BaseModel):
                 raise ValueError(f"sign={mode!r} must not define debit/credit columns")
         if mode == "suffix" and not (self.formats.debit_tokens and self.formats.credit_tokens):
             raise ValueError("sign='suffix' needs debit_tokens and credit_tokens")
+        return self
+
+    @model_validator(mode="after")
+    def _footer_is_a_pdf_only_rule(self) -> "Profile":
+        # rows.footer is honoured by the PDF engine and ignored outright by the
+        # tabular one, so on a CSV or XLSX profile it is a setting that silently
+        # does nothing - the same class of quiet failure `extra="forbid"` exists
+        # to prevent for a mistyped key. Refuse it at load time, where the author
+        # can see it, and name the keys that do work.
+        if self.container != "pdf" and self.rows.footer:
+            raise ValueError(
+                f"rows.footer is a PDF-only rule (it ends a PAGE), but profile "
+                f"{self.id!r} has container = {self.container!r}, whose engine "
+                "never reads it. Put these patterns in rows.skip or rows.summary "
+                "instead, which both engines honour."
+            )
         return self
 
     @model_validator(mode="after")

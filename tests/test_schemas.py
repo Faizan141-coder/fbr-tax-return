@@ -134,6 +134,21 @@ def test_profile_must_have_at_least_one_selftest_case():
         Profile.model_validate(bad)
 
 
+def test_rows_footer_is_refused_on_a_non_pdf_profile():
+    """The tabular engine never reads rows.footer; the PDF engine does.
+
+    The same key meaning two different things per container is how a profile
+    author gets misled. A csv/xlsx profile that declares it must fail at load
+    time rather than carry a setting nothing honours.
+    """
+    bad = {**MINIMAL_PROFILE, "rows": {"footer": [r"(?i)^\s*page\s+\d+"]}}
+    with pytest.raises(ValidationError, match="rows.footer is a PDF-only rule"):
+        Profile.model_validate(bad)
+    # The same patterns are fine under the keys both engines honour.
+    ok = {**MINIMAL_PROFILE, "rows": {"skip": [r"(?i)^\s*page\s+\d+"]}}
+    assert Profile.model_validate(ok).rows.skip
+
+
 def test_compiled_patterns_are_python_re():
     p = Profile.model_validate(MINIMAL_PROFILE)
     assert isinstance(p.summary.compiled()["opening"], re.Pattern)
