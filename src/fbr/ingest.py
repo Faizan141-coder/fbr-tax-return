@@ -197,8 +197,10 @@ def resolve_account(
     meezan-main vanished from the Checks page with nothing warning about it.
 
     More than one match returns None rather than picking one. An unassigned
-    file is reported to the owner and is recoverable on the Load page; a
-    wrongly attributed one produces confident, wrong figures instead.
+    file is reported to the owner, who adds the identifier it prints to the
+    right account in accounts.toml and parses again (the Load page picker of
+    spec 4.2 is not built yet); a wrongly attributed one produces confident,
+    wrong figures instead.
 
     Comparison ignores spacing and case, because statements print IBANs
     grouped in fours as often as not.

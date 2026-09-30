@@ -102,19 +102,16 @@ if run:
     )
 
     if run.unassigned:
-        # This page deliberately offers no account picker, and the per-file
-        # messages in `outcomes` above say so too: both point at accounts.toml,
-        # which is the only control that exists. Keep the two in step - a
-        # message promising a picker that is not here sends the owner looking
-        # for it.
+        # Spec §4.2 says the owner picks the account here when nothing matches.
+        # That picker is not built yet, and the per-file messages in `outcomes`
+        # above used to promise it anyway - which sent the owner looking for a
+        # control that is not on this page. Until it exists, both the messages
+        # and this warning name the one thing that does work. Keep them in step.
         st.warning(
             f"{len(run.unassigned)} file(s) matched no account: "
             + ", ".join(f"`{f.name}`" for f in run.unassigned)
             + ". Each statement is linked by the IBAN, account number or "
             "wallet number it prints. Add that identifier to the matching "
-            "account in `accounts.toml`, then parse again. There is no account "
-            "picker here on purpose: an account the registry does not know "
-            "about has no tax-year window, no prior-year closing balance and "
-            "no `statement_expected` flag, so a figure assigned to it by hand "
-            "would bypass every check that depends on those."
+            "account in `accounts.toml`, then parse again. (Picking the "
+            "account here instead is spec §4.2 and is not built yet.)"
         )
