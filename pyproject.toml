@@ -16,7 +16,11 @@ dependencies = [
 fbr-dump = "tools.dump_layout:main"
 
 [dependency-groups]
-dev = ["pytest>=9.1", "reportlab>=5.0", "pypdf[crypto]>=6.19"]
+dev = [
+    "pytest>=9.1",
+    "reportlab>=5.0",
+    "pypdf[crypto]>=6.19",
+]
 
 [build-system]
 requires = ["hatchling"]
