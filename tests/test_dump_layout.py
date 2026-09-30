@@ -260,12 +260,35 @@ def test_cli_writes_candidates_to_the_private_folder(tmp_path, monkeypatch):
     assert list((tmp_path / "priv" / "dump-candidates").glob("*.txt"))
 
 
-def test_cli_refuses_a_pdf_for_now(tmp_path, monkeypatch, capsys):
+def test_cli_dumps_a_pdf_with_coordinates_and_no_content(tmp_path, monkeypatch, capsys):
+    # Replaces the old "refuses a PDF for now" test: phase 2 wires PDFs in.
+    import getpass
+
+    from tests.fixtures.synth import build_statement
+    from tests.fixtures.synth_pdf import write_sadapay_pdf
+
     monkeypatch.setenv("FBR_PRIVATE_DIR", str(tmp_path / "priv"))
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "")
+    stmt = build_statement(seed=5)
+    src = tmp_path / "s.pdf"
+    src.write_bytes(write_sadapay_pdf(stmt))
+    assert main([str(src)]) == 0
+    out = capsys.readouterr().out
+    assert "PK00TEST" not in out
+    dump = next((tmp_path / "priv").rglob("*.dump.md")).read_text()
+    assert "y=" in dump and "@" in dump
+    assert "PK00TEST" not in dump and "ACCOUNT TITLE" not in dump
+
+
+def test_cli_reports_an_unreadable_pdf_without_echoing_the_error(tmp_path, monkeypatch, capsys):
+    import getpass
+
+    monkeypatch.setenv("FBR_PRIVATE_DIR", str(tmp_path / "priv"))
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "")
     src = tmp_path / "s.pdf"
     src.write_bytes(b"%PDF-1.7\n")
     assert main([str(src)]) == 2
-    assert "phase 2" in capsys.readouterr().err.lower()
+    assert "could not read" in capsys.readouterr().err.lower()
 
 
 def test_cli_reports_a_missing_file(tmp_path, monkeypatch, capsys):

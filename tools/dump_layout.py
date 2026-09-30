@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import getpass
 import io
 import re
 import string
@@ -205,6 +206,63 @@ def dump_tabular(
     return "\n".join(lines), counts
 
 
+def dump_pdf(
+    data: bytes,
+    *,
+    allowlist: set[str],
+    pages: int,
+    hide_magnitude: bool,
+    password: str | None = None,
+) -> tuple[str, Counter]:
+    """Render a masked dump of a PDF: word shapes with their coordinates.
+
+    A profile author needs geometry - which column an amount sits under, how
+    columns are ordered, what the date and amount formats look like. Coordinates
+    are geometry, not content, so they are printed as-is; every word is masked.
+    """
+    import pdfplumber
+
+    counts: Counter = Counter()
+    lines_out: list[str] = []
+    with pdfplumber.open(io.BytesIO(data), password=password or "") as pdf:
+        total = len(pdf.pages)
+        chosen = list(range(min(pages, total)))
+        if total > pages:
+            chosen.append(total - 1)
+        lines_out += [
+            "# Masked layout dump (PDF)",
+            "",
+            f"- pages: {total}",
+            f"- pages shown: {[i + 1 for i in chosen]}",
+            f"- encrypted: {bool(password)}",
+            f"- magnitude hidden: {hide_magnitude}",
+            "",
+            "Every token is a SHAPE (letters -> X/x, digits -> 9) unless it is",
+            "non-personal banking vocabulary. Coordinates are rounded to 1pt and",
+            "are geometry, not content: they are what a profile's column bands",
+            "are built from.",
+            "",
+        ]
+        for i in chosen:
+            page = pdf.pages[i]
+            words = page.extract_words()
+            if any("(cid:" in w["text"] for w in words):
+                lines_out.append(f"## Page {i + 1}: UNMAPPED FONTS ((cid:) glyphs)")
+                continue
+            lines_out += [f"## Page {i + 1} ({len(words)} words)", "", FENCE]
+            rows: dict[int, list[str]] = {}
+            for w in words:
+                shaped = mask_text(w["text"], allowlist=allowlist,
+                                   hide_magnitude=hide_magnitude, counts=counts)
+                rows.setdefault(round(w["top"]), []).append(
+                    f"{shaped}@{round(w['x0'])}-{round(w['x1'])}"
+                )
+            for top in sorted(rows):
+                lines_out.append(f"y={top}: " + "  ".join(rows[top]))
+            lines_out += [FENCE, ""]
+    return "\n".join(lines_out), counts
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fbr-dump",
@@ -216,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hide-magnitude", action="store_true",
                         help="also hide how many digits each amount has")
     parser.add_argument("--password", action="store_true",
-                        help="prompt for a PDF password (phase 2)")
+                        help="accepted for compatibility; PDFs always prompt (never on the command line)")
     args = parser.parse_args(argv)
 
     source = Path(args.path).expanduser()
@@ -226,19 +284,25 @@ def main(argv: list[str] | None = None) -> int:
 
     data = source.read_bytes()
     container = sniff_container(data)
-    if container == "pdf":
-        print(
-            "fbr-dump: PDF dumping arrives in phase 2 with the PDF engine. "
-            "For now, export CSV or XLSX where the bank offers it.",
-            file=sys.stderr,
-        )
-        return 2
 
     allowlist = load_allowlist()
-    text, counts = dump_tabular(
-        data, container, allowlist=allowlist,
-        rows=args.rows, hide_magnitude=args.hide_magnitude,
-    )
+    if container == "pdf":
+        password = getpass.getpass("PDF password (blank if none): ") or None
+        try:
+            text, counts = dump_pdf(
+                data, allowlist=allowlist, pages=2,
+                hide_magnitude=args.hide_magnitude, password=password,
+            )
+        except Exception as exc:                    # noqa: BLE001
+            # Never echo str(exc): it could carry file content or the password.
+            print(f"fbr-dump: could not read this PDF ({type(exc).__name__}); "
+                  "check the password", file=sys.stderr)
+            return 2
+    else:
+        text, counts = dump_tabular(
+            data, container, allowlist=allowlist,
+            rows=args.rows, hide_magnitude=args.hide_magnitude,
+        )
 
     paths.ensure_private_layout()
     digest = sha256_of(data)

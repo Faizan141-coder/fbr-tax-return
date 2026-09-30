@@ -61,14 +61,39 @@ def usable_profiles(
     ok: list[Profile] = []
     report: list[ProfileStatus] = []
     for profile in candidates:
-        status = run_selftest(profile, parse_row)
+        status = run_selftest(
+            profile, parse_row,
+            summary_text=profile.selftest.summary_sample or None,
+        )
         report.append(status)
         if status.ok:
             ok.append(profile)
     return tuple(ok), tuple(report)
 
 
-def _head_text(data: bytes, container: str, rows: int = 30) -> str:
+def _head_text(data: bytes, container: str, rows: int = 30,
+               password: str | None = None) -> str:
+    if container == "pdf":
+        import io
+        try:
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(data), password=password or "") as pdf:
+                return "\n".join((p.extract_text() or "") for p in pdf.pages[:2])
+        except Exception as exc:                    # noqa: BLE001
+            names = " ".join(type(a).__name__ for a in exc.args) + " " + type(exc).__name__
+            text = (str(exc) + " " + names).lower()
+            if "password" in text or "decrypt" in text or "incorrect" in text:
+                from fbr.engines.pdf import PdfPasswordError
+                # Not LayoutUnknown: the layout is not the problem, and the
+                # advice ("send a masked dump") would be wrong.
+                raise PdfPasswordError(
+                    "this PDF is encrypted and the password is missing or did "
+                    "not open it; supply its password on the Load page"
+                ) from None
+            raise LayoutUnknown(
+                f"this file could not be read as a pdf file ({type(exc).__name__}); "
+                "try re-downloading it"
+            ) from None
     try:
         parsed = read_rows(data, container)
     except Exception as exc:  # noqa: BLE001 - see comment below
@@ -110,6 +135,7 @@ def detect_layout(
     container: str,
     *,
     on: date | None = None,
+    password: str | None = None,
 ) -> Profile:
     """Return the single profile that matches this file."""
     candidates, _ = usable_profiles(profiles, container)
@@ -119,7 +145,7 @@ def detect_layout(
             if p.valid_from <= on and (p.valid_to is None or on <= p.valid_to)
         )
 
-    head = _head_text(data, container)
+    head = _head_text(data, container, password=password)
     matched = [p for p in candidates if _matches(p, head)]
 
     if not matched:

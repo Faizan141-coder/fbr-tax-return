@@ -50,6 +50,15 @@ period_to   = '(?i)To\s+Date[^\d\n]+?(?P<value>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\
 semantics = "running"
 kind      = "available"
 
+[selftest]
+summary_sample = """
+PK00TEST0000000000000000,ACCOUNT TITLE
+Currency,PKR
+Opening Balance,PKR5,000.00
+Closing Balance,PKR25,935.59
+From Date,2025-07-01 00:00:00,To Date,2026-06-30 00:00:00
+"""
+
 [[selftest.cases]]
 row = { "Booking Date" = "2025-07-01 10:00:00", "Description" = "IBFT Credit", "Credit" = "+ PKR5,000.00", "Debit" = "", "Available Balance" = "PKR15,000.00" }
 expect_date   = 2025-07-01

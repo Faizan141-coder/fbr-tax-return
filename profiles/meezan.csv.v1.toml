@@ -67,6 +67,17 @@ semantics = "running"
 # it differ when funds are on hold? (spec §12)
 kind      = "available"
 
+[selftest]
+summary_sample = """
+PK00TEST0000000000000000,ACCOUNT TITLE
+OPENING BALANCE,PKR 5,000.00
+CLOSING BALANCE,PKR 25,935.59
+Total Credit,PKR 43,513.93
+Total Debit,PKR 22,578.34
+Currency,PKR
+Statement Period,01 Jul 2025 to 23 Aug 2025
+"""
+
 [[selftest.cases]]
 row = { "Booking Date" = "01 Jul 2025", "Value Date" = "01 Jul 2025", "Doc No" = "D00001", "Description" = "Top-up", "Debit" = "", "Credit" = "1,000.00", "Available Balance" = "1,000.00" }
 expect_date   = 2025-07-01

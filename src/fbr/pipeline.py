@@ -35,6 +35,7 @@ class InputFile:
     name: str
     data: bytes
     account_id: str | None = None      # set by the owner when detection fails
+    password: str | None = None        # held in memory only, never stored
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,22 @@ def read_statement_dir(tax_year_name: str) -> list[InputFile]:
     ]
 
 
+def _parse_for(container: str):
+    """Pick the engine for a container. Both return the same ParseResult."""
+    if container == "pdf":
+        from fbr.engines.pdf import parse_pdf
+
+        def run(data, profile, *, sha256, filename, account_id, password=None):
+            return parse_pdf(data, profile, sha256=sha256, filename=filename,
+                             account_id=account_id, password=password)
+        return run
+
+    def run(data, profile, *, sha256, filename, account_id, password=None):
+        return parse_tabular(data, profile, sha256=sha256, filename=filename,
+                             account_id=account_id)
+    return run
+
+
 def _free_text(data: bytes, container: str) -> str:
     try:
         return "\n".join(",".join(r) for r in read_rows(data, container)[:30])
@@ -122,15 +139,10 @@ def load_files(
         seen_hashes.add(digest)
 
         container = sniff_container(item.data)
-        if container == "pdf":
-            outcomes.append(FileOutcome(
-                item.name, digest, "unsupported", None, None,
-                "PDF statements arrive in phase 2; export CSV or XLSX for now", 0,
-            ))
-            continue
 
         try:
-            profile = detect_layout(item.data, profiles, container)
+            profile = detect_layout(item.data, profiles, container,
+                                     password=item.password)
         except LayoutUnknown as exc:
             outcomes.append(FileOutcome(
                 item.name, digest, "unknown_layout", None, None, str(exc), 0))
@@ -138,6 +150,12 @@ def load_files(
         except LayoutAmbiguous as exc:
             outcomes.append(FileOutcome(
                 item.name, digest, "ambiguous_layout", None, None, str(exc), 0))
+            continue
+        except ParseError as exc:
+            # A missing or wrong PDF password: reported per file, never with
+            # the password itself.
+            outcomes.append(FileOutcome(
+                item.name, digest, "unreadable", None, None, str(exc), 0))
             continue
 
         account_id = item.account_id
@@ -160,8 +178,9 @@ def load_files(
 
         if account_id is None:
             try:
-                probe = parse_tabular(item.data, profile, sha256=digest,
-                                      filename=item.name, account_id=None)
+                probe = _parse_for(container)(
+                    item.data, profile, sha256=digest, filename=item.name,
+                    account_id=None, password=item.password)
             except ParseError as exc:
                 outcomes.append(FileOutcome(
                     item.name, digest, "unreadable", profile.id, None, str(exc), 0))
@@ -179,9 +198,13 @@ def load_files(
             continue
 
         try:
-            result = parse_tabular(item.data, profile, sha256=digest,
-                                   filename=item.name, account_id=account_id)
+            result = _parse_for(container)(
+                item.data, profile, sha256=digest, filename=item.name,
+                account_id=account_id, password=item.password,
+            )
         except ParseError as exc:
+            # PdfPasswordError subclasses ParseError. Its message never contains
+            # the password - asserted by a test in tests/test_pdf_engine.py.
             outcomes.append(FileOutcome(
                 item.name, digest, "unreadable", profile.id, account_id, str(exc), 0))
             continue

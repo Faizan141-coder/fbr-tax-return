@@ -1,0 +1,71 @@
+# SadaPay in-app PDF statement.
+#
+# STATUS: written against the synthetic fixture in tests/fixtures/synth_pdf.py,
+# because no real SadaPay dump has been supplied yet. Every line marked VERIFY
+# must be confirmed against a real `fbr-dump` before this is trusted.
+#
+# Known from research 03: SadaPay prints Date | Description | a signed amount,
+# a Total debit / Total credit summary, and NO balance column anywhere. The
+# statement can be generated for any date range from 1 Jul 2023, so request
+# exactly 1 Jul - 30 Jun and anchor the opening balance by hand.
+#
+# Every regex below uses [^\d\n] rather than \D as its separator: \D matches a
+# newline, so it can harvest a value from an unrelated preamble row. Write \s
+# and \d with ONE backslash - these are TOML literal strings and are not
+# unescaped, and doubling them was a real shipped bug.
+
+id          = "sadapay.pdf.v1"
+institution = "SadaPay"
+container   = "pdf"
+valid_from  = 2025-07-01
+notes       = "In-app PDF: More -> Documents -> Account Statement."
+
+[detect]
+header_contains = ["Date", "Description", "Debit/Credit"]   # VERIFY
+
+[columns]
+date        = "Date"                                        # VERIFY
+description = "Description"                                 # VERIFY
+amount      = "Debit/Credit"                                # VERIFY
+
+[columns.align]
+amount = "right"                                            # VERIFY
+
+[formats]
+dates = ["%d %b, %Y", "%d %b %Y", "%d/%m/%Y"]               # VERIFY which one
+sign  = "signed"
+
+[rows]
+row_anchor = "date"
+footer     = ['(?i)system\s+generated', '(?i)^\s*page\s+\d+']
+
+[summary]
+total_debit  = '(?i)Total\s+debit[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'    # VERIFY
+total_credit = '(?i)Total\s+credit[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'  # VERIFY
+period_from  = '(?i)Statement\s+Period[^\d\n]+?(?P<value>\d{2} \w{3}, \d{4})'  # VERIFY
+period_to    = '(?i)to\s+(?P<value>\d{2} \w{3}, \d{4})'                 # VERIFY
+
+[balance]
+# SadaPay prints no balance at all. Boundary balances therefore come from the
+# owner's manual anchor, and the only parse check available is the printed
+# Total debit / Total credit pair - which is why those patterns matter.
+semantics = "none"
+
+[selftest]
+summary_sample = """
+Account Statement
+Account Currency  PK00TEST0000000000000000  PKR
+Total debit  2,500.00
+Total credit  1,000.00
+Statement Period  01 Jul, 2025 to 30 Jun, 2026
+"""
+
+[[selftest.cases]]
+row = { "Date" = "01 Jul, 2025", "Description" = "TRANSF CR/ICT/ Top-up", "Debit/Credit" = "+1,000.00" }
+expect_date   = 2025-07-01
+expect_amount = 100000
+
+[[selftest.cases]]
+row = { "Date" = "15 Jan, 2026", "Description" = "PUR/ Shop", "Debit/Credit" = "-2,500.00" }
+expect_date   = 2026-01-15
+expect_amount = -250000

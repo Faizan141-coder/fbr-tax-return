@@ -27,14 +27,18 @@ def shipped():
 
 def test_shipped_profiles_load(shipped):
     assert {p.id for p in shipped.profiles} >= {
-        "meezan.csv.v1", "mcb.csv.v1", "nayapay.csv.v1"
+        "meezan.csv.v1", "mcb.csv.v1", "nayapay.csv.v1", "sadapay.pdf.v1"
     }
 
 
 def test_every_shipped_profile_passes_its_own_selftest(shipped):
     for profile in shipped.profiles:
-        status = run_selftest(profile, parse_row)
+        status = run_selftest(profile, parse_row,
+                              summary_text=profile.selftest.summary_sample or None)
         assert status.ok, f"{profile.id}: {status.message}"
+        if profile.summary.compiled():
+            # The message names the patterns only when they were exercised.
+            assert "summary pattern" in status.message, profile.id
 
 
 @pytest.mark.parametrize(

@@ -165,6 +165,12 @@ class SelfTestCase(BaseModel):
 class SelfTest(BaseModel):
     model_config = _STRICT
     cases: list[SelfTestCase]
+    # Preamble text that every declared summary pattern must match. Without
+    # this, a profile's self-test exercises only parse_row, and a summary
+    # pattern that never matches ships silently - which is exactly how a
+    # shipped Meezan XLSX profile spent a release with four dead patterns
+    # and a disabled opening/closing check.
+    summary_sample: str = ""
 
     @field_validator("cases")
     @classmethod

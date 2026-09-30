@@ -51,11 +51,28 @@ else:
         "filed there yet."
     )
     uploaded = st.file_uploader(
-        "Statements", type=["csv", "xlsx"], accept_multiple_files=True
+        "Statements", type=["csv", "xlsx", "pdf"], accept_multiple_files=True
     )
     files = [InputFile(f.name, f.getvalue()) for f in (uploaded or [])]
 
+pdf_names = [f.name for f in files if f.data[:4] == b"%PDF"]
+passwords: dict[str, str] = {}
+if pdf_names:
+    st.caption(
+        "PDF statements may be password-protected. A password typed here is "
+        "held in memory for this run only: it is never written to disk, never "
+        "logged, and never placed on a command line."
+    )
+    shared = st.text_input("PDF password (leave blank if none)", type="password")
+    if shared:
+        passwords = {name: shared for name in pdf_names}
+
 if files and st.button("Parse", type="primary"):
+    files = [
+        InputFile(f.name, f.data, account_id=f.account_id,
+                  password=passwords.get(f.name))
+        for f in files
+    ]
     run = load_files(files, registry=registry, profiles=profiles, tax_year=ty_config)
     st.session_state["run"] = run
 

@@ -66,6 +66,16 @@ period_to    = '(?i)STATEMENT\s+PERIOD[^\d\n]+?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[^\d
 semantics = "running"
 kind      = "ledger"
 
+[selftest]
+summary_sample = """
+Account Number,PK00TEST0000000000000000
+Opening Balance,5,000.00
+Closing Balance,25,935.59
+Total Credit,43,513.93
+Total Debit,22,578.34
+Statement Period,01 Jul 2025 to 23 Aug 2025
+"""
+
 [[selftest.cases]]
 row = { "Date" = "01 Jul 2025", "Description" = "INTERBANK FUNDS RECEIVING", "Reference Number" = "1000000001", "Amount" = "5,000.00Cr", "Balance" = "15,000.00" }
 expect_date   = 2025-07-01

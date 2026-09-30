@@ -50,6 +50,14 @@ period_to   = '(?i)To[^\d\n]+?(?P<value>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})'
 semantics = "running"
 kind      = "ledger"
 
+[selftest]
+summary_sample = """
+Account Number,PK00TEST0000000000000000
+Opening Balance,5,000.00
+Closing Balance,25,935.59
+From,2025-07-01 00:00:00,To,2026-06-30 00:00:00
+"""
+
 [[selftest.cases]]
 row = { "Date" = "2025-07-01 10:00:00", "Description" = "INTERBANK FUNDS RECEIVING", "Reference Number" = "1000000001", "Amount" = "5,000.00Cr", "Balance" = "15000.00" }
 expect_date   = 2025-07-01

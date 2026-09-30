@@ -93,12 +93,22 @@ def load_profiles(directory: Path | None = None) -> ProfileSet:
     return ProfileSet(tuple(profiles), tuple(report))
 
 
-def run_selftest(profile: Profile, parse_row: Callable[[Profile, dict], tuple]) -> ProfileStatus:
-    """Run a profile's own sample rows through the engine.
+def run_selftest(
+    profile: Profile,
+    parse_row: Callable[[Profile, dict], tuple],
+    *,
+    summary_text: str | None = None,
+) -> ProfileStatus:
+    """Run a profile's own sample rows, and its summary patterns, through the code.
 
-    A profile that cannot parse its own samples is excluded from detection:
-    it would otherwise fail silently on the real statement it was written for.
-    `parse_row` returns (date, signed_paisa).
+    A profile that cannot parse its own samples is excluded from detection: it
+    would otherwise fail silently on the real statement it was written for.
+
+    `summary_text` closes a second hole. Summary patterns are regexes in a TOML
+    file and nothing else executes them, so a mistake - doubled backslashes in
+    a literal string, say - leaves a pattern that never matches. The statement
+    still parses, but a reconciliation check quietly stops running. When a
+    sample is supplied, every declared pattern must match it.
     """
     for i, case in enumerate(profile.selftest.cases, start=1):
         try:
@@ -115,7 +125,28 @@ def run_selftest(profile: Profile, parse_row: Callable[[Profile, dict], tuple]) 
                 profile.id, "", False,
                 f"selftest case {i}: amount {got_amount} != expected {case.expect_amount}",
             )
-    return ProfileStatus(profile.id, "", True, f"{len(profile.selftest.cases)} selftest case(s) pass")
+
+    if summary_text:
+        compiled = profile.summary.compiled()
+        dead = [name for name, pattern in compiled.items()
+                if not pattern.search(summary_text)]
+        if dead:
+            return ProfileStatus(
+                profile.id, "", False,
+                f"summary pattern(s) {', '.join(sorted(dead))} match nothing in "
+                "the profile's own summary_sample; a pattern that never matches "
+                "silently disables a reconciliation check",
+            )
+        return ProfileStatus(
+            profile.id, "", True,
+            f"{len(profile.selftest.cases)} selftest case(s) and "
+            f"{len(compiled)} summary pattern(s) pass",
+        )
+
+    return ProfileStatus(
+        profile.id, "", True,
+        f"{len(profile.selftest.cases)} selftest case(s) pass",
+    )
 
 
 def load_registry(path: Path | None = None) -> Registry:

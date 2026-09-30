@@ -61,6 +61,16 @@ period_to    = '(?i)STATEMENT\s+PERIOD[^\d\n]+?\d{1,2}\s+[A-Za-z]{3}\s+\d{4}[^\d
 semantics = "running"
 kind      = "ledger"
 
+[selftest]
+summary_sample = """
+Account,PK00TEST0000000000000000
+Opening Balance,5,000.00
+Closing Balance,25,935.59
+Total Income,43,513.93
+Total Spent,22,578.34
+Statement Period,01 Jul 2025 to 23 Aug 2025
+"""
+
 [[selftest.cases]]
 row = { "Date" = "01 Jul 2025", "Time" = "10:15 AM", "Type" = "IBFT In", "Description" = "Incoming fund transfer", "Amount" = "+Rs. 5,000.00", "Balance" = "Rs. 15,000.00" }
 expect_date   = 2025-07-01
