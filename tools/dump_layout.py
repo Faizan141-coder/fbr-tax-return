@@ -82,13 +82,44 @@ def load_allowlist(extra: Path | None = None) -> set[str]:
     return words
 
 
+# A token may be a compound label joined by `/` or `-`. Neither ends a token
+# (see _BREAKERS), so the whole thing is folded and looked up as one word.
+_COMPOUND = re.compile(r"[/-]")
+
+
+def _is_allowlisted(token: str, allowlist: set[str]) -> bool:
+    """True if the token is allowlisted, or EVERY `/`- or `-`-separated part is.
+
+    `Debit/Credit` is both sadapay.pdf.v1's `detect.header_contains` entry and
+    its amount column, yet the dump rendered it `Xxxxx/Xxxxxx`: `/` does not
+    break a token, so _STRIP folded the whole thing to `DEBITCREDIT`, which is
+    not on the allowlist though `DEBIT` and `CREDIT` each are. The dump hid the
+    one column label it exists to reveal.
+
+    Requiring every part to be allowlisted is the general rule: it releases
+    `Debit/Credit`, `Dr/Cr` and `Date/Time` (whichever parts the allowlist
+    holds), while a personal name glued to an allowlisted word still masks,
+    because the name part is not allowlisted - `Payoneer/AHMED` must not leak
+    `AHMED`. An empty part (`Debit/`) proves nothing about what follows, so it
+    fails closed, and a numeric part is never allowlisted, so an account number
+    or amount written with `-` separators is still shaped.
+    """
+    if _STRIP.sub("", token).upper() in allowlist:
+        return True
+    parts = _COMPOUND.split(token)
+    if len(parts) < 2:
+        return False
+    folded = [_STRIP.sub("", p).upper() for p in parts]
+    return all(folded) and all(p in allowlist for p in folded)
+
+
 def shape(token: str, *, allowlist: set[str], hide_magnitude: bool = False) -> str:
     """Replace a token with its shape, unless it is allowlisted.
 
     Punctuation is kept because separator style (1,234.56 vs 1234.56) and
     suffixes (Dr/Cr) are exactly what a profile author must know.
     """
-    if _STRIP.sub("", token).upper() in allowlist:
+    if _is_allowlisted(token, allowlist):
         return token
 
     out: list[str] = []

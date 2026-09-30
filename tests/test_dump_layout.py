@@ -295,3 +295,58 @@ def test_cli_reports_a_missing_file(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("FBR_PRIVATE_DIR", str(tmp_path / "priv"))
     assert main([str(tmp_path / "nope.csv")]) == 2
     assert "not found" in capsys.readouterr().err.lower()
+
+
+# --------------------------------------------------------------------------
+# Compound labels joined by `/` or `-`.
+#
+# `Debit/Credit` is both sadapay.pdf.v1's detect.header_contains entry AND its
+# amount column, and the dump rendered it `Xxxxx/Xxxxxx`: `/` does not break a
+# token, so _STRIP folded the whole thing to `DEBITCREDIT`, which is not on the
+# allowlist though `DEBIT` and `CREDIT` each are. The masked dump hid the one
+# column label it exists to reveal. A token now survives when EVERY `/`- or
+# `-`-separated part is itself allowlisted.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("token", ["Debit/Credit", "debit/credit", "Date/Time",
+                                   "Credit/Debit", "TOTAL-CREDIT"])
+def test_a_compound_label_of_allowlisted_parts_survives(token):
+    assert shape(token, allowlist=load_allowlist()) == token
+
+
+def test_the_sadapay_detect_label_survives_a_dump():
+    # The concrete regression: this exact string is what a profile author must
+    # read off the dump to write detect.header_contains.
+    allow = load_allowlist()
+    line = "Date        Description        Debit/Credit"
+    assert mask_text(line, allowlist=allow) == line
+
+
+@pytest.mark.parametrize("token,leaked", [
+    ("Payoneer/AHMED", "AHMED"),
+    ("AHMED/Payoneer", "AHMED"),
+    ("Credit-MUHAMMAD", "MUHAMMAD"),
+    ("Debit/FAIZAN/Credit", "FAIZAN"),
+])
+def test_a_name_glued_to_an_allowlisted_word_still_masks(token, leaked):
+    masked = shape(token, allowlist=load_allowlist())
+    assert masked != token
+    assert leaked not in masked
+    # The separator itself is layout signal and must survive.
+    assert ("/" in masked) == ("/" in token)
+    assert ("-" in masked) == ("-" in token)
+
+
+def test_a_compound_of_digits_is_still_shaped():
+    # An account number or an amount written with `-` separators has no
+    # allowlisted part, so it masks as before.
+    allow = load_allowlist()
+    assert shape("1234-5678-9012", allowlist=allow) == "9999-9999-9999"
+    assert shape("PK00TEST-0000", allowlist=allow) == "XX99XXXX-9999"
+
+
+def test_one_unlisted_part_is_enough_to_mask_the_whole_token():
+    # EVERY part must be allowlisted, not any.
+    assert shape("Debit/Zzz", allowlist={"DEBIT", "CREDIT"}) == "Xxxxx/Xxx"
+    assert shape("Debit/Credit", allowlist={"DEBIT"}) == "Xxxxx/Xxxxxx"
