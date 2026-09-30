@@ -65,6 +65,30 @@ def _open(data: bytes, password: str | None):
         raise ParseError(f"cannot open this PDF: {type(exc).__name__}") from None
 
 
+def extract_text(data: bytes, *, password: str | None = None,
+                 pages: int = 2) -> str:
+    """Plain text from the first `pages` pages, for account resolution.
+
+    `pipeline._free_text` used to push PDF bytes through the CSV decoder, so
+    `resolve_account` searched `'%PDF-1.3\\n%...ReportLab...'` and found no
+    identifier: a SadaPay PDF printing an IBAN that a registry account holds
+    resolved to `unassigned`, while the identical CSV resolved `ok`. No profile
+    declares an `account_id` summary pattern, so this body text is the only
+    thing account resolution has to work with on a PDF.
+
+    Two pages, matching `ingest._head_text`: the printed identifier sits in the
+    statement header, and reading the whole document would only widen the window
+    for a transaction description to name some other registry account - which
+    `resolve_account` answers with `None` rather than a guess, but an
+    unnecessary `None` is still a statement the owner has to assign by hand.
+
+    The password reaches `_open` and nothing else: it is never logged, never put
+    in an error message, and never written anywhere.
+    """
+    with _open(data, password) as pdf:
+        return "\n".join((page.extract_text() or "") for page in pdf.pages[:pages])
+
+
 def _page_words(page) -> list[Word]:
     raw = page.extract_words(use_text_flow=False, keep_blank_chars=False,
                              extra_attrs=[])

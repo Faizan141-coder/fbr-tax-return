@@ -104,7 +104,27 @@ def _parse_for(container: str):
     return run
 
 
-def _free_text(data: bytes, container: str) -> str:
+def _free_text(data: bytes, container: str, *, password: str | None = None) -> str:
+    """Body text for `resolve_account` to search for a printed identifier.
+
+    A PDF must go through the PDF text extractor. Running PDF bytes through
+    `read_rows` - the CSV decoder - yielded the file's own binary preamble
+    ("%PDF-1.3 ... ReportLab Generated PDF document"), so `resolve_account`
+    searched that and matched nothing: a SadaPay PDF printing a registry
+    account's IBAN resolved to `unassigned` while the identical CSV resolved
+    `ok`. Every PDF wiring test passed `account_id` explicitly, which is why
+    nothing caught it. The CSV/XLSX path is unchanged.
+    """
+    if container == "pdf":
+        from fbr.engines.pdf import extract_text
+
+        try:
+            return extract_text(data, password=password)
+        except ParseError:
+            # A wrong password or an unreadable PDF. Detection and the parse
+            # both report it per file with their own message; there is nothing
+            # to add here, and the password must not reach one.
+            return ""
     try:
         return "\n".join(",".join(r) for r in read_rows(data, container)[:30])
     except ParseError:
@@ -171,8 +191,8 @@ def load_files(
             unassigned.append(item)
             outcomes.append(FileOutcome(
                 item.name, digest, "unassigned", profile.id, None,
-                f"{account_id!r} is not a known registry account id; "
-                "choose one on the Load page", 0,
+                f"{account_id!r} is not a known registry account id; it must "
+                "match an account's `id` in accounts.toml", 0,
             ))
             continue
 
@@ -186,14 +206,22 @@ def load_files(
                     item.name, digest, "unreadable", profile.id, None, str(exc), 0))
                 continue
             account_id = resolve_account(
-                probe.document.summary, _free_text(item.data, container), registry
+                probe.document.summary,
+                _free_text(item.data, container, password=item.password),
+                registry,
             )
 
         if account_id is None:
             unassigned.append(item)
+            # The message names the ONE thing the owner can actually do. It used
+            # to say "choose one on the Load page", and that page has no account
+            # picker - only a warning pointing at accounts.toml. A message
+            # naming a control that does not exist is worse than a blunt one.
             outcomes.append(FileOutcome(
                 item.name, digest, "unassigned", profile.id, None,
-                "no registry account matches this statement; choose one on the Load page", 0,
+                "no registry account matches this statement; add the IBAN, "
+                "account number or wallet number it prints to that account in "
+                "accounts.toml, then parse again", 0,
             ))
             continue
 

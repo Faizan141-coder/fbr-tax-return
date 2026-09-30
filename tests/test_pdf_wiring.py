@@ -12,7 +12,7 @@ from fbr.engines.tabular import parse_row
 from fbr.ingest import detect_layout, sniff_container, usable_profiles
 from fbr.model import Account, Owner, Registry
 from fbr.pipeline import InputFile, load_files
-from tests.fixtures.synth import build_statement
+from tests.fixtures.synth import TEST_IBAN, build_statement
 from tests.fixtures.synth_pdf import encrypt_pdf, write_sadapay_pdf
 from tests.test_loader import TAXYEAR_TOML
 
@@ -33,10 +33,14 @@ def ty(tmp_path):
 
 @pytest.fixture
 def registry():
+    # The IBAN is the one the synthetic statements print, so a file with no
+    # explicit account_id has something real to resolve against. Without it,
+    # every PDF test had to pass account_id="sadapay" - which is how dead PDF
+    # account resolution went unnoticed.
     return Registry(
         owner=Owner(name="OWNER NAME"),
         accounts=(Account(
-            id="sadapay", institution="SadaPay", kind="wallet", iban="",
+            id="sadapay", institution="SadaPay", kind="wallet", iban=TEST_IBAN,
             account_number="", wallet_number="03001234567", title="ACCOUNT TITLE",
             type="", ownership="Self", currency="PKR", statement_expected=True,
             match_hints=("SADA",)),),
@@ -118,6 +122,73 @@ def test_a_sadapay_statement_whose_totals_do_match_still_produces_figures(
     assert ledger.status != "failed"
     assert len(ledger.transactions) == len(stmt.txns)
     assert ledger.closing == 500000 + sum(t.amount for t in stmt.txns)
+
+
+def test_a_pdf_resolves_its_account_from_the_printed_iban(shipped, registry, ty):
+    """No explicit account_id: the IBAN the PDF prints must do the work.
+
+    `pipeline._free_text` pushed PDF bytes through the CSV decoder, so
+    `resolve_account` searched the file's binary preamble and found nothing.
+    Measured before the fix: this same file resolved to `unassigned` while the
+    identical CSV case resolved `ok`. Every other PDF wiring test passes
+    account_id="sadapay" explicitly, which is exactly why nothing caught it.
+    """
+    stmt = build_statement(seed=234, start=date(2025, 7, 1), end=date(2026, 6, 30),
+                           account_id="PK00TEST0000000000000000")
+    run = load_files([InputFile("sada.pdf", write_sadapay_pdf(stmt))],
+                     registry=registry, profiles=shipped, tax_year=ty,
+                     anchors={"sadapay": 500000})
+    outcome = run.outcomes[0]
+    assert outcome.status == "ok", outcome.message
+    assert outcome.account_id == "sadapay"
+    assert run.unassigned == ()
+
+
+def test_an_encrypted_pdf_resolves_its_account_too(shipped, registry, ty):
+    """The password must reach the text extractor, and never a message."""
+    stmt = build_statement(seed=235, start=date(2025, 7, 1), end=date(2026, 6, 30),
+                           account_id="PK00TEST0000000000000000")
+    data = encrypt_pdf(write_sadapay_pdf(stmt), "s3cret")
+    run = load_files([InputFile("sada.pdf", data, password="s3cret")],
+                     registry=registry, profiles=shipped, tax_year=ty,
+                     anchors={"sadapay": 500000})
+    outcome = run.outcomes[0]
+    assert outcome.status == "ok", outcome.message
+    assert outcome.account_id == "sadapay"
+    assert "s3cret" not in outcome.message
+
+
+def test_an_unassignable_pdf_is_told_what_it_can_actually_do(shipped, ty):
+    """The message must not name a control the Load page does not have."""
+    empty = Registry(
+        owner=Owner(name="OWNER NAME"),
+        accounts=(Account(
+            id="other", institution="Other Bank", kind="bank",
+            iban="PK00TEST1111111111111111", account_number="",
+            wallet_number="", title="OTHER", type="", ownership="Self",
+            currency="PKR", statement_expected=False, match_hints=()),),
+    )
+    stmt = build_statement(seed=236, start=date(2025, 7, 1), end=date(2026, 6, 30),
+                           account_id="PK00TEST0000000000000000")
+    run = load_files([InputFile("sada.pdf", write_sadapay_pdf(stmt))],
+                     registry=empty, profiles=shipped, tax_year=ty)
+    message = run.outcomes[0].message
+    assert run.outcomes[0].status == "unassigned"
+    assert "Load page" not in message
+    assert "accounts.toml" in message
+
+
+def test_an_unknown_explicit_account_id_is_told_what_it_can_actually_do(
+    shipped, registry, ty
+):
+    run = load_files([InputFile("sada.pdf",
+                                write_sadapay_pdf(build_statement(seed=237)),
+                                account_id="no-such-account")],
+                     registry=registry, profiles=shipped, tax_year=ty)
+    message = run.outcomes[0].message
+    assert run.outcomes[0].status == "unassigned"
+    assert "Load page" not in message
+    assert "accounts.toml" in message
 
 
 def test_a_pdf_is_no_longer_reported_unsupported(shipped, registry, ty):
