@@ -184,6 +184,8 @@ def _rows_from_pdf(
     preamble_parts: list[str] = []
     bands = None
     empty_pages = 0
+    open_row: dict | None = None      # persists across pages: a wrapped
+                                      # description can start a new page
 
     for page_no, page in enumerate(pdf.pages, start=1):
         words = _page_words(page)
@@ -211,7 +213,6 @@ def _rows_from_pdf(
                 continue          # a cover page before any header
             body = lines
 
-        open_row: dict | None = None
         for line in body:
             raw = " ".join(w.text for w in line)
             if any(r.search(raw) for r in footer_res):
