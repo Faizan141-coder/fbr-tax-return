@@ -1,7 +1,7 @@
 # Whole-branch fix report — phase 2 (PDF engine + SadaPay)
 
 Branch `main`. Findings reproduced at `344af41` (405 tests passing) and fixed in
-six commits ending at `4b6ce21` (423 tests passing). Every figure below came out
+seven commits, `4a158b1`..`81ae418` (423 tests passing). Every figure below came out
 of an execution, not a reading.
 
 Reproduction scripts lived in the session scratchpad and are not committed; the
@@ -21,7 +21,8 @@ behaviours they measured are now pinned by tests named under each finding.
 
 ## CRITICAL 1 — a statement reported "complete" when no arithmetic check ran
 
-Commit `4a158b1`.
+Commits `4a158b1`, `81ae418` (the latter only adapts the detail's opening clause
+for the case where one of the three ran and failed rather than being absent).
 
 ### Before
 
