@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import io
 import re
-from datetime import date, datetime
+from datetime import date
 
 import pdfplumber
 
 from fbr.config.schema_profile import Profile
 from fbr.engines._bands import BandError, Word, assign, build_bands, group_lines
+from fbr.engines._shared import is_empty, labels, parse_date, read_summary, strip_suffix
 from fbr.engines.tabular import ParseError, ParseResult, UnresolvedRow
 from fbr.model import (
     Document,
-    DocumentSummary,
     Provenance,
     Transaction,
     assign_occurrences,
@@ -35,8 +35,6 @@ from fbr.model import (
     tax_year_for,
 )
 from fbr.money import AmountError, parse_paisa
-
-_EMPTY = {"", "-", "--", "—", "–", "n/a", "na", "nil"}
 
 
 class PdfPasswordError(ParseError):
@@ -95,19 +93,13 @@ def _page_words(page) -> list[Word]:
     return [Word.from_dict(w) for w in raw]
 
 
-def _labels(spec) -> list[str]:
-    if spec is None:
-        return []
-    return [spec] if isinstance(spec, str) else list(spec)
-
-
 def _roles_and_aligns(profile: Profile) -> tuple[dict[str, str], dict[str, str]]:
     roles: dict[str, str] = {}
     for role in ("date", "value_date", "description", "reference", "debit",
                  "credit", "amount", "balance", "type"):
-        labels = _labels(getattr(profile.columns, role, None))
-        if labels:
-            roles[role] = labels[0]
+        found = labels(getattr(profile.columns, role, None))
+        if found:
+            roles[role] = found[0]
     align = profile.columns.align
     aligns = {
         "date": "left", "value_date": "left", "description": "left",
@@ -127,33 +119,13 @@ def _find_header(lines: list[list[Word]], profile: Profile) -> int | None:
     return None
 
 
-def _parse_date(text: str, profile: Profile) -> date:
-    for fmt in profile.formats.dates:
-        try:
-            return datetime.strptime(text.strip(), fmt).date()
-        except ValueError:
-            continue
-    raise ValueError(f"date {text!r} matches none of {profile.formats.dates}")
-
-
-def _strip_suffix(text: str, profile: Profile) -> tuple[str, int]:
-    cleaned = text.strip()
-    for token in profile.formats.credit_tokens:
-        if cleaned.lower().endswith(token.lower()):
-            return cleaned[: -len(token)].strip(" ."), 1
-    for token in profile.formats.debit_tokens:
-        if cleaned.lower().endswith(token.lower()):
-            return cleaned[: -len(token)].strip(" ."), -1
-    raise ValueError(f"amount {text!r} carries no Dr/Cr token")
-
-
 def _amount_from_cells(cells: dict[str, str], profile: Profile) -> tuple[int, str]:
     mode = profile.formats.sign
     dec = profile.formats.decimals
     if mode == "columns":
         debit, credit = cells.get("debit", ""), cells.get("credit", "")
-        d_empty = debit.strip().lower() in _EMPTY
-        c_empty = credit.strip().lower() in _EMPTY
+        d_empty = is_empty(debit)
+        c_empty = is_empty(credit)
         if d_empty and c_empty:
             raise ValueError("row has no amount in either the debit or credit column")
         if not d_empty and not c_empty:
@@ -162,36 +134,12 @@ def _amount_from_cells(cells: dict[str, str], profile: Profile) -> tuple[int, st
             return -parse_paisa(debit, decimals=dec), "column"
         return parse_paisa(credit, decimals=dec), "column"
     raw = cells.get("amount", "")
-    if raw.strip().lower() in _EMPTY:
+    if is_empty(raw):
         raise ValueError("row has no amount")
     if mode == "suffix":
-        number, direction = _strip_suffix(raw, profile)
+        number, direction = strip_suffix(raw, profile)
         return direction * abs(parse_paisa(number, decimals=dec)), "suffix"
     return parse_paisa(raw, decimals=dec), "signed"
-
-
-def _read_summary(text: str, profile: Profile) -> DocumentSummary:
-    found: dict[str, object] = {}
-    for name, pattern in profile.summary.compiled().items():
-        m = pattern.search(text)
-        if not m:
-            continue
-        value = m.group("value")
-        if name in ("opening", "closing", "total_credit", "total_debit"):
-            try:
-                found[name] = parse_paisa(value, decimals=profile.formats.decimals)
-            except AmountError:
-                continue
-        elif name in ("period_from", "period_to"):
-            try:
-                found["period_start" if name == "period_from" else "period_end"] = (
-                    _parse_date(value, profile)
-                )
-            except ValueError:
-                continue
-        else:
-            found["account_identifier"] = value.strip()
-    return DocumentSummary(**found)          # type: ignore[arg-type]
 
 
 def _rows_from_pdf(
@@ -293,7 +241,7 @@ def _rows_from_pdf(
 
             locator = f"page:{page_no},y:{round(line[0].top)}"
             date_text = cells.get("date", "")
-            has_date = bool(date_text) and date_text.strip().lower() not in _EMPTY
+            has_date = not is_empty(date_text)
 
             if profile.rows.row_anchor == "date" and not has_date:
                 # A dateless line. ONLY description text may be absorbed into
@@ -309,7 +257,7 @@ def _rows_from_pdf(
                 carried = [
                     f"{role} {cells[role]!r}"
                     for role in ("debit", "credit", "amount", "balance")
-                    if cells.get(role, "").strip().lower() not in _EMPTY
+                    if not is_empty(cells.get(role, ""))
                 ]
                 problems: list[str] = []
                 if carried:
@@ -346,7 +294,7 @@ def _rows_from_pdf(
                 continue
 
             try:
-                d = _parse_date(date_text, profile)
+                d = parse_date(date_text, profile)
             except ValueError as exc:
                 unresolved.append(UnresolvedRow(locator, raw, f"unreadable date: {exc}"))
                 open_row = None
@@ -361,7 +309,7 @@ def _rows_from_pdf(
 
             balance: int | None = None
             balance_text = cells.get("balance", "")
-            if profile.balance.semantics == "running" and balance_text.strip().lower() not in _EMPTY:
+            if profile.balance.semantics == "running" and not is_empty(balance_text):
                 try:
                     balance = parse_paisa(balance_text,
                                           decimals=profile.formats.decimals)
@@ -371,9 +319,24 @@ def _rows_from_pdf(
                     open_row = None
                     continue
 
+            # A value_date band is built whenever the profile names the column
+            # (_roles_and_aligns), so its words were assigned, consumed, and then
+            # thrown away against a hardcoded None - no field, no unresolved row,
+            # nothing. The tabular engine parses value_date, so this one does
+            # too. An unreadable one stays None exactly as it does there: the
+            # value date moves no money and the booking date is what every check
+            # and every tax-year slice uses.
+            value_date: date | None = None
+            value_date_text = cells.get("value_date", "")
+            if not is_empty(value_date_text):
+                try:
+                    value_date = parse_date(value_date_text, profile)
+                except ValueError:
+                    value_date = None
+
             open_row = {
                 "date": d,
-                "value_date": None,
+                "value_date": value_date,
                 "amount": amount,
                 "balance_after": balance,
                 "description": cells.get("description", ""),
@@ -423,7 +386,7 @@ def parse_pdf(
             "scan, which is not supported"
         )
 
-    summary = _read_summary(preamble, profile)
+    summary = read_summary(preamble, profile)
     occurrences = assign_occurrences(staged)
     transactions = tuple(
         Transaction(

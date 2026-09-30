@@ -16,12 +16,12 @@ import csv
 import io
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 
 from fbr.config.schema_profile import Profile
+from fbr.engines._shared import is_empty, labels, parse_date, read_summary, strip_suffix
 from fbr.model import (
     Document,
-    DocumentSummary,
     Provenance,
     Transaction,
     assign_occurrences,
@@ -30,8 +30,10 @@ from fbr.model import (
 )
 from fbr.money import AmountError, parse_paisa
 
-# Values a bank prints to mean "nothing on this side of the ledger".
-_EMPTY_MARKERS = {"", "-", "--", "—", "–", "n/a", "na", "nil"}
+# `_read_summary` stays importable under its old name: tests/test_loader.py pins
+# the loader's capture parsing against it, and that pin now covers the ONE
+# implementation both engines use (fbr.engines._shared).
+_read_summary = read_summary
 
 
 class ParseError(RuntimeError):
@@ -83,12 +85,6 @@ def _read_xlsx(data: bytes) -> list[list[str]]:
         wb.close()
 
 
-def _labels(spec: str | list[str] | None) -> list[str]:
-    if spec is None:
-        return []
-    return [spec] if isinstance(spec, str) else list(spec)
-
-
 def _find_header(rows: list[list[str]], profile: Profile) -> int:
     """Return the index of the header row, searching the first 30 rows."""
     wanted = [w.strip().lower() for w in profile.detect.header_contains]
@@ -131,16 +127,16 @@ def _map_columns(
         required.add("balance")
 
     for role in roles:
-        for label in _labels(getattr(profile.columns, role, None)):
+        for label in labels(getattr(profile.columns, role, None)):
             idx = normalized.get(label.strip().lower())
             if idx is not None:
                 mapping[role] = idx
                 break
         else:
             if role in required:
-                labels = _labels(getattr(profile.columns, role, None))
+                wanted = labels(getattr(profile.columns, role, None))
                 raise ParseError(
-                    f"profile {profile.id!r} expects column {labels!r} for role "
+                    f"profile {profile.id!r} expects column {wanted!r} for role "
                     f"{role!r}; header has {header!r}"
                 )
     return mapping
@@ -153,41 +149,13 @@ def _cell(row: list[str], mapping: dict[str, int], role: str) -> str:
     return row[idx].strip()
 
 
-def _is_empty(value: str) -> bool:
-    return value.strip().lower() in _EMPTY_MARKERS
-
-
-def _parse_date(text: str, profile: Profile) -> date:
-    for fmt in profile.formats.dates:
-        try:
-            return datetime.strptime(text.strip(), fmt).date()
-        except ValueError:
-            continue
-    raise ValueError(f"date {text!r} matches none of {profile.formats.dates}")
-
-
-def _strip_suffix(text: str, profile: Profile) -> tuple[str, int]:
-    """Split an MCB-style '1,234.00Dr' into its number and its direction."""
-    cleaned = text.strip()
-    for token in profile.formats.credit_tokens:
-        if cleaned.lower().endswith(token.lower()):
-            return cleaned[: -len(token)].strip(" ."), 1
-    for token in profile.formats.debit_tokens:
-        if cleaned.lower().endswith(token.lower()):
-            return cleaned[: -len(token)].strip(" ."), -1
-    raise ValueError(
-        f"amount {text!r} has no direction token "
-        f"({profile.formats.debit_tokens + profile.formats.credit_tokens})"
-    )
-
-
 def _amount_for(row: list[str], mapping: dict[str, int], profile: Profile) -> tuple[int, str]:
     """Return (signed paisa, sign_source). Raises ValueError if unreadable."""
     mode = profile.formats.sign
 
     if mode == "columns":
         debit, credit = _cell(row, mapping, "debit"), _cell(row, mapping, "credit")
-        d_empty, c_empty = _is_empty(debit), _is_empty(credit)
+        d_empty, c_empty = is_empty(debit), is_empty(credit)
         if d_empty and c_empty:
             raise ValueError("row has no amount in either the debit or credit column")
         if not d_empty and not c_empty:
@@ -197,11 +165,11 @@ def _amount_for(row: list[str], mapping: dict[str, int], profile: Profile) -> tu
         return parse_paisa(credit, decimals=profile.formats.decimals), "column"
 
     raw = _cell(row, mapping, "amount")
-    if _is_empty(raw):
+    if is_empty(raw):
         raise ValueError("row has no amount")
 
     if mode == "suffix":
-        number, direction = _strip_suffix(raw, profile)
+        number, direction = strip_suffix(raw, profile)
         return direction * abs(parse_paisa(number, decimals=profile.formats.decimals)), "suffix"
 
     return parse_paisa(raw, decimals=profile.formats.decimals), "signed"
@@ -216,34 +184,9 @@ def parse_row(profile: Profile, row: dict[str, str]) -> tuple[date, int]:
     header = list(row.keys())
     values = [row[k] for k in header]
     mapping = _map_columns(header, profile, require_balance=False)
-    d = _parse_date(_cell(values, mapping, "date"), profile)
+    d = parse_date(_cell(values, mapping, "date"), profile)
     amount, _ = _amount_for(values, mapping, profile)
     return d, amount
-
-
-def _read_summary(preamble_text: str, profile: Profile) -> DocumentSummary:
-    """Pull opening/closing/totals/period out of the rows above the header."""
-    found: dict[str, object] = {}
-    for name, pattern in profile.summary.compiled().items():
-        m = pattern.search(preamble_text)
-        if not m:
-            continue
-        value = m.group("value")
-        if name in ("opening", "closing", "total_credit", "total_debit"):
-            try:
-                found[name] = parse_paisa(value, decimals=profile.formats.decimals)
-            except AmountError:
-                continue
-        elif name in ("period_from", "period_to"):
-            try:
-                found["period_start" if name == "period_from" else "period_end"] = (
-                    _parse_date(value, profile)
-                )
-            except ValueError:
-                continue
-        else:
-            found["account_identifier"] = value.strip()
-    return DocumentSummary(**found)  # type: ignore[arg-type]
 
 
 def parse_tabular(
@@ -262,7 +205,7 @@ def parse_tabular(
     header_i = _find_header(rows, profile)
     mapping = _map_columns(rows[header_i], profile)
     preamble = "\n".join(",".join(r) for r in rows[:header_i])
-    summary = _read_summary(preamble, profile)
+    summary = read_summary(preamble, profile)
 
     skip_res = [re.compile(p) for p in profile.rows.skip]
     summary_res = [re.compile(p) for p in profile.rows.summary]
@@ -279,11 +222,11 @@ def parse_tabular(
             continue
 
         date_text = _cell(row, mapping, "date")
-        if _is_empty(date_text):
+        if is_empty(date_text):
             unresolved.append(UnresolvedRow(locator, raw, "row has no date"))
             continue
         try:
-            d = _parse_date(date_text, profile)
+            d = parse_date(date_text, profile)
         except ValueError as exc:
             unresolved.append(UnresolvedRow(locator, raw, f"unreadable date: {exc}"))
             continue
@@ -296,7 +239,7 @@ def parse_tabular(
 
         balance_text = _cell(row, mapping, "balance")
         balance: int | None = None
-        if profile.balance.semantics == "running" and not _is_empty(balance_text):
+        if profile.balance.semantics == "running" and not is_empty(balance_text):
             try:
                 balance = parse_paisa(balance_text, decimals=profile.formats.decimals)
             except AmountError as exc:
@@ -305,9 +248,9 @@ def parse_tabular(
 
         value_date_text = _cell(row, mapping, "value_date")
         value_date: date | None = None
-        if not _is_empty(value_date_text):
+        if not is_empty(value_date_text):
             try:
-                value_date = _parse_date(value_date_text, profile)
+                value_date = parse_date(value_date_text, profile)
             except ValueError:
                 value_date = None
 

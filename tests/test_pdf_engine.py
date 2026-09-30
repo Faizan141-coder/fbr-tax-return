@@ -134,6 +134,91 @@ def _meezan_page(lines, *, opening="1,000.00", closing=None, cover=False):
     return buf.getvalue()
 
 
+_VALUE_DATE = Profile.model_validate({
+    "id": "vdate.pdf.v1", "institution": "Test", "container": "pdf",
+    "valid_from": date(2025, 7, 1),
+    "detect": {"header_contains": ["Booking Date", "Value Date", "Amount"]},
+    "columns": {"date": "Booking Date", "value_date": "Value Date",
+                "description": "Description", "amount": "Amount",
+                "align": {"amount": "right"}},
+    "formats": {"dates": ["%d %b %Y"], "sign": "signed"},
+    "rows": {"row_anchor": "date"},
+    "balance": {"semantics": "none"},
+    "selftest": {"cases": [{
+        "row": {"Booking Date": "01 Jul 2025", "Value Date": "02 Jul 2025",
+                "Description": "Top-up", "Amount": "+1,000.00"},
+        "expect_date": date(2025, 7, 1), "expect_amount": 100000}]},
+})
+
+
+def _value_date_pdf(value_date: str) -> bytes:
+    import io
+
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    y = A4[1] - 60
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(40, y, "Booking Date")
+    c.drawString(120, y, "Value Date")
+    c.drawString(200, y, "Description")
+    c.drawRightString(420, y, "Amount")
+    c.setFont("Helvetica", 8)
+    y -= 16
+    c.drawString(40, y, "01 Jul 2025")
+    if value_date:
+        c.drawString(120, y, value_date)
+    c.drawString(200, y, "Top-up")
+    c.drawRightString(420, y, "+1,000.00")
+    c.save()
+    return buf.getvalue()
+
+
+def test_a_value_date_column_is_parsed_not_swallowed():
+    """The band was built, the word was consumed, and the field was hardcoded None.
+
+    _roles_and_aligns builds a value_date band whenever the profile names the
+    column, so "02 Jul 2025" was assigned to it and then thrown away - no field,
+    no unresolved row, nothing. The tabular engine parses value_date; this one
+    now does too.
+    """
+    res = _parse(_value_date_pdf("02 Jul 2025"), _VALUE_DATE)
+    assert res.unresolved == ()
+    assert [t.value_date for t in res.transactions] == [date(2025, 7, 2)]
+    assert [t.date for t in res.transactions] == [date(2025, 7, 1)]
+
+
+def test_a_blank_or_unreadable_value_date_leaves_the_row_alone():
+    """Same as the tabular engine: the value date moves no money."""
+    assert _parse(_value_date_pdf(""), _VALUE_DATE).transactions[0].value_date is None
+    res = _parse(_value_date_pdf("not-a-date"), _VALUE_DATE)
+    assert res.transactions[0].value_date is None
+    assert res.transactions[0].date == date(2025, 7, 1)
+    assert res.transactions[0].amount == 100000
+
+
+def test_both_engines_share_one_copy_of_every_duplicated_helper():
+    """Five helpers were byte-identical in both engines, and only one was pinned.
+
+    tests/test_loader.py pins the loader's capture parsing against
+    `tabular._read_summary`, so the CSV engine's copy could not drift - and the
+    PDF engine's could drift freely, silently reading a different figure out of
+    the same [summary] pattern on a PDF than on a CSV. Identity, not equality:
+    two equal-but-separate copies is the state this replaced.
+    """
+    from fbr.engines import _shared, pdf as pdf_engine, tabular as tabular_engine
+
+    for name in ("is_empty", "labels", "parse_date", "strip_suffix", "read_summary"):
+        shared = getattr(_shared, name)
+        assert getattr(pdf_engine, name) is shared, name
+        assert getattr(tabular_engine, name) is shared, name
+    assert tabular_engine._read_summary is _shared.read_summary
+    # The one remaining constant, likewise shared rather than copied.
+    assert pdf_engine.is_empty("—") and pdf_engine.is_empty("nil")
+
+
 def test_parses_a_sadapay_statement():
     stmt = build_statement(seed=11)
     res = _parse(write_sadapay_pdf(stmt), SADAPAY)
