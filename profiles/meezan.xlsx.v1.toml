@@ -1,0 +1,61 @@
+# Meezan Bank XLSX export.
+#
+# Written from real fbr-dump (e80f3960d62c). The first 7 rows are a preamble
+# (account info, currency, opening/closing balance) followed by the column
+# header on row 8: "Booking Date,Description,,Credit,Debit,Available Balance,"
+#
+# Amount values carry a currency prefix (e.g. "PKR999,999.99") and a leading
+# sign ("+ " for credit, "- " for debit). The engine must strip the prefix
+# before parsing; the prefix itself acts as a reliable detect signal.
+#
+# Date format from dump: "9999-99-99 99:99:99" → %Y-%m-%d %H:%M:%S
+
+id          = "meezan.xlsx.v1"
+institution = "Meezan Bank Limited"
+container   = "xlsx"
+valid_from  = 2025-07-01
+notes       = "XLSX export from Meezan internet banking or mobile app."
+
+[detect]
+# Row 8 of the sheet is the actual column header; fbr-dump confirms these
+# exact labels in that row.
+header_contains = ["Booking Date", "Available Balance"]
+
+[columns]
+date        = "Booking Date"
+description = "Description"
+credit      = "Credit"
+debit       = "Debit"
+balance     = "Available Balance"
+
+[formats]
+# Dump shape: "9999-99-99 99:99:99"
+dates = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+sign  = "columns"
+
+[rows]
+# The preamble rows (account title, currency, opening/closing balance) all
+# lack a date; the engine skips blank-date rows automatically for xlsx.
+# Skip any residual summary-like rows by matching the opening/closing labels.
+skip = ['(?i)^\s*(opening|closing)\s+balance']
+
+[summary]
+opening     = '(?i)Opening\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'
+closing     = '(?i)Closing\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'
+# Meezan xlsx preamble row 4: "From Date  <datetime>  To Date  <datetime>"
+period_from = '(?i)From\s+Date[^\d\n]+?(?P<value>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})'
+period_to   = '(?i)To\s+Date[^\d\n]+?(?P<value>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})'
+
+[balance]
+semantics = "running"
+kind      = "available"
+
+[[selftest.cases]]
+row = { "Booking Date" = "2025-07-01 10:00:00", "Description" = "IBFT Credit", "Credit" = "+ PKR5,000.00", "Debit" = "", "Available Balance" = "PKR15,000.00" }
+expect_date   = 2025-07-01
+expect_amount = 500000
+
+[[selftest.cases]]
+row = { "Booking Date" = "2025-07-02 11:00:00", "Description" = "ATM Cash Withdrawal", "Credit" = "", "Debit" = "PKR2,000.00", "Available Balance" = "PKR13,000.00" }
+expect_date   = 2025-07-02
+expect_amount = -200000

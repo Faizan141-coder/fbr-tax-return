@@ -1,0 +1,61 @@
+# MCB Bank XLSX export (MCB Live "Download Statement").
+#
+# Written from real fbr-dump (5493f541ca92).
+# The MCB xlsx has NO header row — data begins on row 1.
+# Columns by position: 0=Date, 1=Description, 2=Reference, 3=Amount(Dr/Cr), 4=Balance
+#
+# Because there is no header row the column labels below are synthetic names
+# that match what the engine reads from the first data row when it searches
+# for the header. Instead detect uses title_regex on the filename to identify
+# MCB xlsx files, and header_contains uses tokens that appear in the data.
+#
+# Amount has a Dr/Cr suffix glued to the value, e.g. "1,234.00Dr".
+# Date format from dump: "9999-99-99 99:99:99" = %Y-%m-%d %H:%M:%S
+
+id          = "mcb.xlsx.v1"
+institution = "MCB Bank Limited"
+container   = "xlsx"
+valid_from  = 2025-07-01
+notes       = "XLSX export from MCB Live (Account Management -> Download Statement)."
+
+[detect]
+# MCB xlsx has no header row. Detect via filename pattern.
+# header_contains uses tokens that appear in MCB data rows.
+header_contains = ["Dr", "Cr"]
+title_regex     = "(?i)mcb"
+
+[columns]
+date        = "Date"
+description = "Description"
+reference   = "Reference Number"
+amount      = "Amount"
+balance     = "Balance"
+
+[formats]
+dates         = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+sign          = "suffix"
+debit_tokens  = ["Dr", "DR"]
+credit_tokens = ["Cr", "CR"]
+
+[rows]
+skip = []
+
+[summary]
+opening     = '(?i)Opening\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'
+closing     = '(?i)Closing\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'
+period_from = '(?i)From[^\d\n]+?(?P<value>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})'
+period_to   = '(?i)To[^\d\n]+?(?P<value>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})'
+
+[balance]
+semantics = "running"
+kind      = "ledger"
+
+[[selftest.cases]]
+row = { "Date" = "2025-07-01 10:00:00", "Description" = "INTERBANK FUNDS RECEIVING", "Reference Number" = "1000000001", "Amount" = "5,000.00Cr", "Balance" = "15000.00" }
+expect_date   = 2025-07-01
+expect_amount = 500000
+
+[[selftest.cases]]
+row = { "Date" = "2025-07-02 11:00:00", "Description" = "ATM CASH WITHDRAWAL-ATM", "Reference Number" = "1000000002", "Amount" = "2,000.00Dr", "Balance" = "13000.00" }
+expect_date   = 2025-07-02
+expect_amount = -200000
