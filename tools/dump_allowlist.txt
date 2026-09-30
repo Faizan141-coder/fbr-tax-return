@@ -14,6 +14,12 @@ PARTICULARS
 REFERENCE
 DEBIT
 CREDIT
+# The glued direction tokens MCB prints as "1,234.00Dr". shape() releases a
+# 1-3 letter suffix glued to a number only when the suffix is on this list, so
+# these two are what make Dr visible from Cr in a dump; without them the whole
+# token masked to "9,999.99Xx" and formats.sign = "suffix" could not be written.
+DR
+CR
 AMOUNT
 BALANCE
 AVAILABLE

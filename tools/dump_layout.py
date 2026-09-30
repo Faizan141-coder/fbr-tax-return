@@ -86,6 +86,13 @@ def load_allowlist(extra: Path | None = None) -> set[str]:
 # (see _BREAKERS), so the whole thing is folded and looked up as one word.
 _COMPOUND = re.compile(r"[/-]")
 
+# A number with a direction token glued to its end: MCB's "1,234.00Dr". The
+# suffix is capped at three letters and must itself be allowlisted, so this can
+# only ever release banking vocabulary - never a name, and never the number.
+_GLUED_SUFFIX = re.compile(
+    r"^(?P<number>[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?P<suffix>[A-Za-z]{1,3})\.?$"
+)
+
 
 def _is_allowlisted(token: str, allowlist: set[str]) -> bool:
     """True if the token is allowlisted, or EVERY `/`- or `-`-separated part is.
@@ -116,11 +123,29 @@ def _is_allowlisted(token: str, allowlist: set[str]) -> bool:
 def shape(token: str, *, allowlist: set[str], hide_magnitude: bool = False) -> str:
     """Replace a token with its shape, unless it is allowlisted.
 
-    Punctuation is kept because separator style (1,234.56 vs 1234.56) and
-    suffixes (Dr/Cr) are exactly what a profile author must know.
+    Punctuation is kept because separator style (1,234.56 vs 1234.56) is
+    exactly what a profile author must know.
+
+    A GLUED direction token is kept too, and that is a fix, not a restatement:
+    this docstring and the comment below both claimed "a glued Dr" survived a
+    dump, and it did not. `/` does not break a token (see _BREAKERS) and neither
+    does a letter following a digit, so "1,234.00Dr" folded to "123400DR", which
+    is on no allowlist, and came out "9,999.99Xx" - hiding Dr from Cr, the one
+    thing `formats.sign = "suffix"` and `debit_tokens`/`credit_tokens` are
+    written from. It is the same class of loss the `Debit/Credit` header fix
+    addressed, and the same rule fixes it: split the token, shape the part that
+    could identify anything, and release only the part the allowlist holds.
     """
     if _is_allowlisted(token, allowlist):
         return token
+
+    glued = _GLUED_SUFFIX.match(token)
+    if glued and _STRIP.sub("", glued["suffix"]).upper() in allowlist:
+        # The number is still shaped; only the allowlisted suffix comes through,
+        # with whatever separator sat between them.
+        number = shape(glued["number"], allowlist=allowlist,
+                       hide_magnitude=hide_magnitude)
+        return token.replace(glued["number"], number, 1)
 
     out: list[str] = []
     for ch in token:
@@ -132,8 +157,10 @@ def shape(token: str, *, allowlist: set[str], hide_magnitude: bool = False) -> s
             out.append("x")
         elif ch.isascii():
             # ASCII punctuation and separators are the layout signal a
-            # profile author needs (1,234.56 vs 1234.56, a glued "Dr"), so
-            # they survive. This is the ONLY thing that survives unshaped.
+            # profile author needs (1,234.56 vs 1234.56), so they survive.
+            # A glued direction token survives too, but not here - it is
+            # released by the _GLUED_SUFFIX branch above, which requires the
+            # suffix to be on the allowlist.
             out.append(ch)
         else:
             # Anything else non-ASCII: a caseless letter (Urdu, Arabic, CJK,
@@ -300,8 +327,15 @@ def main(argv: list[str] | None = None) -> int:
         description="Write a masked layout dump of a statement into the private folder.",
     )
     parser.add_argument("path", help="statement file to dump")
+    # --rows never applied to a PDF: dump_pdf took pages=2, hardcoded, so the
+    # flag was accepted and silently ignored. Each option now says which
+    # container it governs, and --pages actually reaches dump_pdf.
     parser.add_argument("--rows", type=int, default=15,
-                        help="rows to show from the start and end (default 15)")
+                        help="CSV/XLSX only: rows to show from the start and "
+                             "end (default 15)")
+    parser.add_argument("--pages", type=int, default=2,
+                        help="PDF only: pages to show from the start; the last "
+                             "page is always added (default 2)")
     parser.add_argument("--hide-magnitude", action="store_true",
                         help="also hide how many digits each amount has")
     parser.add_argument("--password", action="store_true",
@@ -321,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         password = getpass.getpass("PDF password (blank if none): ") or None
         try:
             text, counts = dump_pdf(
-                data, allowlist=allowlist, pages=2,
+                data, allowlist=allowlist, pages=max(1, args.pages),
                 hide_magnitude=args.hide_magnitude, password=password,
             )
         except Exception as exc:                    # noqa: BLE001

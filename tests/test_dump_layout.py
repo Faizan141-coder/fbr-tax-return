@@ -280,6 +280,62 @@ def test_cli_dumps_a_pdf_with_coordinates_and_no_content(tmp_path, monkeypatch, 
     assert "PK00TEST" not in dump and "ACCOUNT TITLE" not in dump
 
 
+def test_a_glued_direction_token_survives_a_dump():
+    """The docstring claimed it did; it did not.
+
+    "1,234.00Dr" folded to "123400DR", which is on no allowlist, and came out
+    "9,999.99Xx" - hiding Dr from Cr, which is exactly what a `sign = "suffix"`
+    profile's debit_tokens/credit_tokens are written from. The magnitude is
+    still masked; only the allowlisted suffix comes through.
+    """
+    allow = load_allowlist()          # the shipped list, which now holds DR/CR
+    assert shape("1,234.00Dr", allowlist=allow) == "9,999.99Dr"
+    assert shape("1,234.00Cr", allowlist=allow) == "9,999.99Cr"
+    assert shape("500Dr", allowlist=allow) == "999Dr"
+    assert shape("1,234.00 Dr", allowlist=allow) == "9,999.99 Dr"
+    # Hiding magnitude still hides it, suffix and all.
+    assert shape("1,234,567.89Dr", allowlist=allow,
+                 hide_magnitude=True) == "9,999.99Dr"
+
+
+def test_only_an_allowlisted_suffix_is_released_and_never_the_number():
+    allow = load_allowlist()
+    # A name glued to a number is not vocabulary: it masks whole.
+    assert shape("1,234.00AHM", allowlist=allow) == "9,999.99XXX"
+    assert shape("1,234.00Xyz", allowlist=allow) == "9,999.99Xxx"
+    # A long digit run with a glued suffix is still every digit masked.
+    assert shape("0300123456Dr", allowlist=allow) == "9999999999Dr"
+    # And an account identifier is untouched by the new branch.
+    assert shape("PK00TEST0000000000000000",
+                 allowlist=allow) == "XX99XXXX9999999999999999"
+
+
+def test_cli_honours_pages_for_a_pdf(tmp_path, monkeypatch, capsys):
+    """--rows never reached a PDF (pages=2 was hardcoded); --pages does."""
+    import getpass
+
+    from tests.fixtures.synth import build_statement
+    from tests.fixtures.synth_pdf import write_sadapay_pdf
+
+    monkeypatch.setenv("FBR_PRIVATE_DIR", str(tmp_path / "priv"))
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "")
+    # count=170 spills the sadapay fixture over several pages.
+    src = tmp_path / "s.pdf"
+    src.write_bytes(write_sadapay_pdf(build_statement(seed=71, count=170)))
+
+    assert main([str(src), "--pages", "1"]) == 0
+    one = next((tmp_path / "priv").rglob("*.dump.md")).read_text()
+    for f in (tmp_path / "priv").rglob("*.dump.md"):
+        f.unlink()
+
+    assert main([str(src), "--pages", "3"]) == 0
+    three = next((tmp_path / "priv").rglob("*.dump.md")).read_text()
+
+    assert one.count("## Page ") < three.count("## Page ")
+    assert "- pages shown: [1," in one          # plus the last page
+    assert "- pages shown: [1, 2, 3" in three
+
+
 def test_cli_reports_an_unreadable_pdf_without_echoing_the_error(tmp_path, monkeypatch, capsys):
     import getpass
 
