@@ -32,4 +32,10 @@ Classification, review, the IRIS summary and the Excel export arrive in later ph
 """
 )
 
-st.info("Phase 0–1: CSV/XLSX statements only. PDF support arrives in phase 2.")
+st.info(
+    "Statements can be CSV, XLSX or PDF. A password-protected PDF — as an "
+    "emailed bank statement usually is — asks for its password on the **Load** "
+    "page; that password is held in memory for the run only, never written to "
+    "disk, logged, or placed on a command line. A scanned PDF has no text layer "
+    "and cannot be read."
+)
