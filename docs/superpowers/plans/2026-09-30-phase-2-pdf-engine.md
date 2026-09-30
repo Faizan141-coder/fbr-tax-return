@@ -451,9 +451,9 @@ EOF
 - Consumes: nothing (pure geometry)
 - Produces:
   - `Word(text: str, x0: float, x1: float, top: float, bottom: float)` — a frozen dataclass; pdfplumber dicts convert with `Word.from_dict`
-  - `Band(role: str, x0: float, x1: float, align: str)`
+  - `Band(role: str, x0: float, x1: float, align: str)` — for a right- or centre-aligned column `x0..x1` is the header label's own box; for a left-aligned text column `x1` extends to where the next column starts
   - `build_bands(header: list[Word], roles: dict[str, str], aligns: dict[str, str]) -> tuple[Band, ...]` — `roles` maps a role name to the header label that marks it
-  - `assign(word: Word, bands: tuple[Band, ...], *, tolerance: float = 6.0) -> str | None` — the role, or `None` when the token is outside every band **or equally close to two**
+  - `assign(word: Word, bands: tuple[Band, ...], *, tolerance: float = 6.0) -> str | None` — **two stages.** A numeric (right- or centre-aligned) column claims the word by edge proximity, which is what separates Meezan's unsigned Credit from its Debit. Only if no numeric column claims it does a left-aligned text column claim it by *containment*, because a description spans far more than a tolerance's width. Returns `None` when nothing claims it, or when two numeric columns are equally close.
   - `group_lines(words: list[Word], *, y_tolerance: float = 3.0) -> list[list[Word]]` — visual lines in printed order
   - `class BandError(RuntimeError)`
 
@@ -510,6 +510,36 @@ def test_missing_header_label_raises_naming_it():
 def test_right_aligned_amount_goes_to_the_nearest_header_right_edge():
     assert assign(Word("500.00", 372, 400, 120, 128), _bands()) == "credit"
     assert assign(Word("200.00", 442, 470, 120, 128), _bands()) == "debit"
+
+
+def test_every_word_of_a_multiword_description_assigns():
+    # A tolerance-only assign() claims the first word and orphans the rest,
+    # which turns every row into an unresolved row and fails every statement.
+    # A text column must claim by containment, not by edge proximity.
+    bands = _bands()
+    for i, text in enumerate(["TRANSF", "CR/ICT/", "Top-up", "from", "SOMEONE"]):
+        x0 = 130 + i * 36
+        assert assign(Word(text, x0, x0 + 30, 120, 128), bands) == "description", text
+
+
+def test_a_long_description_stops_at_the_first_money_column():
+    # It must not bleed into Credit, whose band starts at 378.
+    bands = _bands()
+    assert assign(Word("tail", 360, 376, 120, 128), bands) == "description"
+    assert assign(Word("tail", 380, 396, 120, 128), bands) != "description"
+
+
+def test_a_date_assigns_across_its_own_width():
+    bands = _bands()
+    assert assign(Word("01", 40, 52, 120, 128), bands) == "date"
+    assert assign(Word("Jul", 54, 70, 120, 128), bands) == "date"
+    assert assign(Word("2025", 72, 90, 120, 128), bands) == "date"
+
+
+def test_a_money_column_still_wins_over_the_text_span_containing_it():
+    # Credit's band sits inside the description column's span; the numeric
+    # edge test must be tried first or every amount becomes description text.
+    assert assign(Word("500.00", 372, 400, 120, 128), _bands()) == "credit"
 
 
 def test_an_amount_between_two_columns_is_ambiguous_not_guessed():
@@ -625,12 +655,29 @@ def _find_label(header: list[Word], label: str) -> tuple[float, float]:
 def build_bands(
     header: list[Word], roles: dict[str, str], aligns: dict[str, str]
 ) -> tuple[Band, ...]:
-    """Build one band per role from the header row's word boxes."""
-    bands = [
-        Band(role, *_find_label(header, label), aligns.get(role, "right"))
-        for role, label in roles.items()
-    ]
-    return tuple(sorted(bands, key=lambda b: b.x0))
+    """Build one band per role from the header row's word boxes.
+
+    A numeric column keeps its header label's own narrow box, because an
+    amount is matched on its right edge. A text column instead spans from its
+    own left edge to wherever the next column begins: a description is many
+    words wide, and matching it on an edge would orphan every word but the
+    first.
+    """
+    raw = sorted(
+        (
+            (role, *_find_label(header, label), aligns.get(role, "right"))
+            for role, label in roles.items()
+        ),
+        key=lambda r: r[1],
+    )
+    bands: list[Band] = []
+    for i, (role, x0, x1, align) in enumerate(raw):
+        if align == "left":
+            next_x0 = raw[i + 1][1] if i + 1 < len(raw) else float("inf")
+            bands.append(Band(role, x0, next_x0, align))
+        else:
+            bands.append(Band(role, x0, x1, align))
+    return tuple(bands)
 
 
 def _edge(word: Word, align: str) -> float:
@@ -642,8 +689,6 @@ def _edge(word: Word, align: str) -> float:
 
 
 def _band_edge(band: Band) -> float:
-    if band.align == "left":
-        return band.x0
     if band.align == "center":
         return (band.x0 + band.x1) / 2
     return band.x1
@@ -654,21 +699,38 @@ def assign(
 ) -> str | None:
     """Return the role this word belongs to, or None when it is not clear.
 
+    Two stages, and the order matters:
+
+    1. A numeric column claims the word by edge proximity. This is the test
+       that separates Meezan's unsigned Credit from its Debit, and it runs
+       first because a money column's band sits inside the description
+       column's span - reversed, every amount would be read as description
+       text.
+    2. Otherwise a text column claims it by containment, since a description
+       is many words wide.
+
     None is a deliberate outcome: the caller turns it into an unresolved row,
-    which fails the statement, which is far better than assigning an amount to
-    the wrong side of the ledger.
+    which fails the statement. That is far better than assigning an amount to
+    the wrong side of the ledger, which reconciles against itself and reports
+    a confidently wrong figure.
     """
     scored: list[tuple[float, str]] = []
     for band in bands:
+        if band.align == "left":
+            continue
         distance = abs(_edge(word, band.align) - _band_edge(band))
         if distance <= tolerance:
             scored.append((distance, band.role))
-    if not scored:
-        return None
-    scored.sort()
-    if len(scored) > 1 and abs(scored[0][0] - scored[1][0]) < 1e-9:
-        return None          # equally close to two columns
-    return scored[0][1]
+    if scored:
+        scored.sort()
+        if len(scored) > 1 and abs(scored[0][0] - scored[1][0]) < 1e-9:
+            return None          # equally close to two money columns
+        return scored[0][1]
+
+    for band in bands:
+        if band.align == "left" and band.x0 - tolerance <= word.x0 < band.x1:
+            return band.role
+    return None
 
 
 def group_lines(
