@@ -184,10 +184,12 @@ def _rows_from_pdf(
     preamble_parts: list[str] = []
     bands = None
     empty_pages = 0
+    pages_seen = 0
     open_row: dict | None = None      # persists across pages: a wrapped
                                       # description can start a new page
 
     for page_no, page in enumerate(pdf.pages, start=1):
+        pages_seen += 1
         words = _page_words(page)
         if not words:
             empty_pages += 1
@@ -236,7 +238,39 @@ def _rows_from_pdf(
             has_date = bool(date_text) and date_text.strip().lower() not in _EMPTY
 
             if profile.rows.row_anchor == "date" and not has_date:
-                # A continuation line: append its description to the open row.
+                # A dateless line. ONLY description text may be absorbed into
+                # the open row. A dateless line that carries money is not a
+                # continuation - it is a row whose date the bank did not
+                # reprint (common on a same-day second row), and absorbing it
+                # DISCARDED the amount, the balance and the ambiguity list.
+                # That lost real money while every check stayed green: the
+                # balance vanished with the row, so the running-balance chain
+                # still verified over the rows that survived, `unresolved` was
+                # empty, and statement_usable() returned True. Money must
+                # never leave this engine without an UnresolvedRow naming it.
+                carried = [
+                    f"{role} {cells[role]!r}"
+                    for role in ("debit", "credit", "amount", "balance")
+                    if cells.get(role, "").strip().lower() not in _EMPTY
+                ]
+                problems: list[str] = []
+                if carried:
+                    problems.append("carries " + ", ".join(carried))
+                if ambiguous:
+                    problems.append(
+                        f"has token(s) outside every column band: {ambiguous!r}"
+                    )
+                if problems:
+                    unresolved.append(UnresolvedRow(
+                        locator, raw,
+                        f"row has no date in the {roles.get('date', 'date')!r} "
+                        f"column but {' and '.join(problems)}; it cannot be a "
+                        "description continuation, and its figures must not be "
+                        "silently dropped",
+                    ))
+                    open_row = None
+                    continue
+                # A genuine continuation: description text only.
                 if open_row is not None and cells.get("description"):
                     open_row["description"] = (
                         open_row["description"] + " " + cells["description"]
@@ -291,6 +325,22 @@ def _rows_from_pdf(
                 "raw": raw,
             }
             staged.append(open_row)
+
+    if bands is None and pages_seen > empty_pages:
+        # No page ever produced a header, yet at least one page had text. The
+        # tabular engine raises here (tabular._find_header); this one used to
+        # return nothing at all, so a SadaPay PDF read with the Meezan profile
+        # gave 0 transactions, 0 unresolved rows, no exception and
+        # statement_usable() == True. An engine that reports a wrong layout as
+        # a clean empty statement fails open, which is the one thing it may
+        # not do. A cover page before the first header, and continuation pages
+        # that repeat no header, are still fine: this fires only when NOT ONE
+        # page matched.
+        raise ParseError(
+            f"header row not found for profile {profile.id!r} on any of the "
+            f"{pages_seen} page(s); expected all of "
+            f"{profile.detect.header_contains}"
+        )
 
     return staged, unresolved, "\n".join(preamble_parts), empty_pages
 

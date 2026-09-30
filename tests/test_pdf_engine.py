@@ -11,7 +11,7 @@ import pytest
 
 from fbr.config.schema_profile import Profile
 from fbr.engines.pdf import PdfNotTextual, PdfPasswordError, parse_pdf, pdf_row_samples
-from fbr.engines.tabular import parse_row
+from fbr.engines.tabular import ParseError, parse_row
 from fbr.reconcile import check_statement, statement_usable
 from tests.fixtures.synth import SynthTxn, build_statement
 from tests.fixtures.synth_pdf import (
@@ -72,6 +72,67 @@ def _parse(data, profile, password=None, account_id="acct"):
                      account_id=account_id, password=password)
 
 
+# Column x-positions shared with tests/fixtures/synth_pdf.py: Credit's right
+# edge at 400, Debit's at 470, Available Balance's at 555.
+_CREDIT_X, _DEBIT_X, _BALANCE_X = 400, 470, 555
+_MIDWAY_X = (_CREDIT_X + _DEBIT_X) // 2      # equally close to two columns
+
+
+def _meezan_page(lines, *, opening="1,000.00", closing=None, cover=False):
+    """Draw one Meezan-style page from explicit line specs.
+
+    Each line is a dict of what to place where: `date`, `desc`, `credit`,
+    `debit`, `balance`, and `midway` for an amount drawn deliberately between
+    the Credit and Debit columns. Omitting a key leaves that cell blank, which
+    is how a dateless line is expressed.
+
+    `cover=True` puts a header-less page in front, to prove the engine still
+    tolerates a cover page before the first header row.
+    """
+    import io
+
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.setFont("Helvetica", 8)
+    if cover:
+        c.drawString(40, A4[1] - 60, "Meezan Bank  Account Statement")
+        c.drawString(40, A4[1] - 76, "This cover page carries no column header.")
+        c.showPage()
+        c.setFont("Helvetica", 8)
+    y = A4[1] - 60
+    c.drawString(40, y, f"OPENING BALANCE  PKR {opening}")
+    if closing is not None:
+        y -= 16
+        c.drawString(40, y, f"CLOSING BALANCE  PKR {closing}")
+    y -= 24
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(40, y, "Booking Date")
+    c.drawString(130, y, "Description")
+    c.drawRightString(_CREDIT_X, y, "Credit")
+    c.drawRightString(_DEBIT_X, y, "Debit")
+    c.drawRightString(_BALANCE_X, y, "Available Balance")
+    c.setFont("Helvetica", 8)
+    for line in lines:
+        y -= 16
+        if line.get("date"):
+            c.drawString(40, y, line["date"])
+        if line.get("desc"):
+            c.drawString(130, y, line["desc"])
+        if line.get("credit"):
+            c.drawRightString(_CREDIT_X, y, line["credit"])
+        if line.get("debit"):
+            c.drawRightString(_DEBIT_X, y, line["debit"])
+        if line.get("midway"):
+            c.drawRightString(_MIDWAY_X, y, line["midway"])
+        if line.get("balance"):
+            c.drawRightString(_BALANCE_X, y, line["balance"])
+    c.save()
+    return buf.getvalue()
+
+
 def test_parses_a_sadapay_statement():
     stmt = build_statement(seed=11)
     res = _parse(write_sadapay_pdf(stmt), SADAPAY)
@@ -130,12 +191,108 @@ def test_a_footer_line_is_not_a_transaction():
 
 
 def test_a_wrapped_description_is_joined_onto_its_row():
-    res = _parse(write_wrapped_description_pdf(build_statement(seed=17, count=4)),
-                 MEEZAN_PDF)
+    stmt = build_statement(seed=17, count=4)
+    res = _parse(write_wrapped_description_pdf(stmt), MEEZAN_PDF)
     assert res.unresolved == ()
-    assert any("CONTINUATION" in t.description for t in res.transactions)
+    # Assert every row's EXACT description, not `any(...)`. The fixture puts the
+    # LAST row's continuation on page 2, and `any(...)` still passed when that
+    # one row silently truncated to "ATM Cash Withdrawal STAN 654321" - which is
+    # precisely how the page-break bug hid. Only the exact final string fails a
+    # regression.
+    assert [t.description for t in res.transactions] == [
+        "Withholding Tax Debit CONTINUATION STAN 100000",
+        "POS Transaction STAN 222333 CONTINUATION STAN 100001",
+        "IBFT In from THUNES STAN 123456 CONTINUATION STAN 100002",
+        "ATM Cash Withdrawal STAN 654321 CONTINUATION STAN 100003",
+    ]
     # The continuation line must not become its own transaction.
-    assert len([t for t in res.transactions if t.description.startswith("CONTINUATION")]) == 0
+    assert len(res.transactions) == len(stmt.txns)
+    assert not any(t.description.startswith("CONTINUATION") for t in res.transactions)
+
+
+def test_a_dateless_line_carrying_an_amount_is_unresolved_not_swallowed():
+    # The worst outcome this engine can produce. A bank that does not reprint
+    # the date on a same-day second row used to have that row absorbed as a
+    # description continuation, which DISCARDED its amount and its balance. The
+    # balance vanished with the row, so the running-balance chain still
+    # verified over what was left, `unresolved` was empty, and
+    # statement_usable() returned True: Rs 700.00 gone with every check green.
+    res = _parse(_meezan_page([
+        {"date": "02 Jul 2025", "desc": "Money Received",
+         "credit": "500.00", "balance": "1,500.00"},
+        {"desc": "Second Same Day Credit",
+         "credit": "700.00", "balance": "2,200.00"},
+    ]), MEEZAN_PDF)
+
+    assert [t.amount for t in res.transactions] == [50000]
+    assert len(res.unresolved) == 1
+    reason = res.unresolved[0].reason
+    assert "no date" in reason
+    # The reason must name the money it refused, so the owner can find the row.
+    assert "700.00" in reason and "2,200.00" in reason
+    checks = check_statement(res, MEEZAN_PDF)
+    assert not statement_usable(checks)
+    assert any(c.kind == "unresolved_rows" and c.status == "fail" for c in checks)
+
+
+def test_a_dateless_line_of_description_text_still_joins_its_row():
+    res = _parse(_meezan_page([
+        {"date": "02 Jul 2025", "desc": "IBFT In from THUNES",
+         "credit": "500.00", "balance": "1,500.00"},
+        {"desc": "STAN 123456 REF ABCDEF"},
+    ]), MEEZAN_PDF)
+
+    assert res.unresolved == ()
+    assert len(res.transactions) == 1
+    assert res.transactions[0].description == "IBFT In from THUNES STAN 123456 REF ABCDEF"
+    assert res.transactions[0].amount == 50000
+    assert res.transactions[0].balance_after == 150000
+
+
+def test_a_dateless_line_with_an_ambiguous_token_is_unresolved():
+    # No amount lands in a band at all here, so nothing is "carried" - but a
+    # token sitting equally close to Credit and Debit is exactly the case this
+    # engine must never guess at, dateless or not.
+    res = _parse(_meezan_page([
+        {"date": "02 Jul 2025", "desc": "Money Received",
+         "credit": "500.00", "balance": "1,500.00"},
+        {"desc": "Same Day", "midway": "700.00"},
+    ]), MEEZAN_PDF)
+
+    assert [t.amount for t in res.transactions] == [50000]
+    assert len(res.unresolved) == 1
+    reason = res.unresolved[0].reason
+    assert "no date" in reason and "outside every column band" in reason
+    assert "700.00" in reason
+    assert not statement_usable(check_statement(res, MEEZAN_PDF))
+
+
+def test_a_pdf_whose_header_is_never_found_is_refused():
+    # tabular.py raises ParseError in this situation; this engine used to
+    # return 0 transactions, 0 unresolved rows and statement_usable() == True,
+    # so reading a SadaPay PDF with the Meezan profile looked like a clean
+    # empty statement. The two engines must not disagree about failing open.
+    data = write_sadapay_pdf(build_statement(seed=24))
+    with pytest.raises(ParseError) as exc:
+        _parse(data, MEEZAN_PDF)
+    message = str(exc.value)
+    assert "header row not found" in message
+    # It must name the labels it looked for, so the owner can see the mismatch.
+    for label in MEEZAN_PDF.detect.header_contains:
+        assert label in message
+    assert not isinstance(exc.value, (PdfNotTextual, PdfPasswordError))
+
+
+def test_a_cover_page_before_the_first_header_is_still_parsed():
+    # The header-never-found refusal must not break the legitimate case it
+    # sits next to: page 1 carries text but no header, page 2 carries both.
+    res = _parse(_meezan_page([
+        {"date": "02 Jul 2025", "desc": "Money Received",
+         "credit": "500.00", "balance": "1,500.00"},
+    ], cover=True), MEEZAN_PDF)
+
+    assert res.unresolved == ()
+    assert [t.amount for t in res.transactions] == [50000]
 
 
 def test_rows_stay_in_printed_order():
