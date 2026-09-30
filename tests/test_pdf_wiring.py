@@ -81,6 +81,45 @@ def test_the_pipeline_parses_a_pdf_end_to_end(shipped, registry, ty):
     assert len(run.ledgers["sadapay"].transactions) == len(stmt.txns)
 
 
+def test_a_sadapay_statement_whose_totals_do_not_match_yields_no_figures(
+    shipped, registry, ty
+):
+    """The account must fail closed, not report "complete" on unproved figures.
+
+    Measured before the fix: status "complete"/"incomplete" with a 30 June
+    closing balance that no arithmetic check had touched.
+    """
+    stmt = build_statement(seed=134, start=date(2025, 7, 1), end=date(2026, 6, 30),
+                           account_id="PK00TEST0000000000000000")
+    run = load_files([InputFile("sada.pdf",
+                                write_sadapay_pdf(stmt, summary_wording="unmatched"),
+                                account_id="sadapay")],
+                     registry=registry, profiles=shipped, tax_year=ty,
+                     anchors={"sadapay": 500000})
+    ledger = run.ledgers["sadapay"]
+    assert ledger.status == "failed"
+    assert ledger.transactions == ()
+    assert ledger.closing is None and ledger.closing_source == "unknown"
+    assert "nothing_verified" in {c.kind for c in ledger.checks if c.status == "fail"}
+
+
+def test_a_sadapay_statement_whose_totals_do_match_still_produces_figures(
+    shipped, registry, ty
+):
+    """The consequence of the fix is bounded: a matching statement is unharmed."""
+    stmt = build_statement(seed=135, start=date(2025, 7, 1), end=date(2026, 6, 30),
+                           account_id="PK00TEST0000000000000000")
+    run = load_files([InputFile("sada.pdf",
+                                write_sadapay_pdf(stmt, summary_wording="profile"),
+                                account_id="sadapay")],
+                     registry=registry, profiles=shipped, tax_year=ty,
+                     anchors={"sadapay": 500000})
+    ledger = run.ledgers["sadapay"]
+    assert ledger.status != "failed"
+    assert len(ledger.transactions) == len(stmt.txns)
+    assert ledger.closing == 500000 + sum(t.amount for t in stmt.txns)
+
+
 def test_a_pdf_is_no_longer_reported_unsupported(shipped, registry, ty):
     run = load_files([InputFile("sada.pdf", write_sadapay_pdf(build_statement(seed=35)),
                                 account_id="sadapay")],

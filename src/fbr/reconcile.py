@@ -120,6 +120,53 @@ def _check_printed_totals(result: ParseResult) -> Check | None:
     )
 
 
+def _check_nothing_verified(amount_checks: dict[str, Check | None]) -> Check | None:
+    """Fail when not one of the three amount checks actually verified anything.
+
+    "Absent" and "verified" were indistinguishable before this. Each of the
+    three checks above returns `None` when its inputs are simply not there -
+    `running_balance` with no balance column, `printed_totals` with neither
+    printed total matched - and `_check_opening_closing` warns rather than
+    fails when the statement prints no balances. A layout that has none of
+    them therefore produced `[opening_closing warn, unresolved_rows pass,
+    date_range pass]`, `statement_usable() == True`, and an account reported
+    "complete" with a 30 June closing figure that no arithmetic had ever
+    touched. The green tick carried no information at all.
+
+    Measured on the first such layout (sadapay.pdf.v1, balance.semantics =
+    "none", no opening/closing patterns): a two-page statement whose totals
+    were worded differently from the profile's `# VERIFY` patterns parsed 1 of
+    2 transactions and reported a net of Rs 300.00 where the truth was
+    Rs 100.00, with zero unresolved rows and every check pass or warn.
+
+    So the absence of proof is itself a failure. A statement whose amounts
+    nothing can verify must not contribute a figure to a tax return: the owner
+    either fixes the profile's [summary] patterns so the printed totals are
+    read, or supplies a statement that prints something checkable.
+
+    Returns `None` - not a passing check - once any of the three passes: each
+    of them already reports its own pass, and repeating it here would only add
+    a second row saying the same thing.
+    """
+    if any(c is not None and c.status == "pass" for c in amount_checks.values()):
+        return None
+    states = ", ".join(
+        f"{kind} {'absent' if check is None else check.status}"
+        for kind, check in amount_checks.items()
+    )
+    return _check(
+        "nothing_verified", "fail",
+        "running_balance, opening_closing or printed_totals to pass",
+        "none of them did",
+        "no arithmetic check could be run against this statement, so nothing "
+        f"confirms the figures parsed out of it ({states}). A layout that "
+        "prints no running balance can only be proved by its own printed "
+        "totals or opening/closing balances: check that this profile's "
+        "[summary] patterns match the statement's exact wording (run "
+        "`fbr-dump` on it), or use a statement that prints them.",
+    )
+
+
 def _check_unresolved(result: ParseResult) -> Check:
     if not result.unresolved:
         return _check("unresolved_rows", "pass", "0", "0", "every row parsed")
@@ -151,10 +198,18 @@ def _check_date_range(result: ParseResult) -> Check:
 
 def check_statement(result: ParseResult, profile: Profile) -> tuple[Check, ...]:
     """Run every per-statement check (spec §6.1)."""
+    # The three that verify AMOUNTS are held separately, because whether any
+    # of them managed to verify anything is itself a check (_check_nothing_
+    # verified). unresolved_rows and date_range are not in that set: an empty
+    # unresolved list and an in-range date prove nothing about the money.
+    amount_checks = {
+        "running_balance": _check_running_balance(result, profile),
+        "opening_closing": _check_opening_closing(result),
+        "printed_totals": _check_printed_totals(result),
+    }
     checks = [
-        _check_running_balance(result, profile),
-        _check_opening_closing(result),
-        _check_printed_totals(result),
+        *amount_checks.values(),
+        _check_nothing_verified(amount_checks),
         _check_unresolved(result),
         _check_date_range(result),
     ]

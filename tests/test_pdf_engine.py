@@ -156,6 +156,52 @@ def test_sadapay_reconciles_against_its_printed_totals():
     assert any(c.kind == "printed_totals" and c.status == "pass" for c in checks)
 
 
+def test_sadapay_with_working_totals_patterns_still_passes():
+    """printed_totals passing is what makes a no-balance layout usable at all."""
+    stmt = build_statement(seed=113)
+    res = _parse(write_sadapay_pdf(stmt, summary_wording="profile"), SADAPAY)
+    checks = check_statement(res, SADAPAY)
+    assert statement_usable(checks)
+    assert any(c.kind == "printed_totals" and c.status == "pass" for c in checks)
+    # Something verified the amounts, so nothing_verified must stay silent.
+    assert "nothing_verified" not in {c.kind for c in checks}
+
+
+def test_sadapay_with_dead_summary_patterns_is_refused():
+    """No balance column and no matching totals means NOTHING checked the money.
+
+    Before `nothing_verified`, this produced [opening_closing warn,
+    unresolved_rows pass, date_range warn] and statement_usable() == True - a
+    green statement whose figures no arithmetic had ever touched.
+    """
+    stmt = build_statement(seed=114)
+    res = _parse(write_sadapay_pdf(stmt, summary_wording="unmatched"), SADAPAY)
+    # The rows themselves parse fine; it is the PROOF that is missing.
+    assert [t.amount for t in res.transactions] == [t.amount for t in stmt.txns]
+    assert res.document.summary.total_credit is None
+    assert res.document.summary.total_debit is None
+
+    checks = check_statement(res, SADAPAY)
+    failed = [c for c in checks if c.status == "fail"]
+    assert [c.kind for c in failed] == ["nothing_verified"]
+    assert statement_usable(checks) is False
+    detail = failed[0].detail
+    assert "no arithmetic check could be run" in detail
+    # The detail must name which of the three were absent or warned.
+    assert "running_balance absent" in detail
+    assert "opening_closing warn" in detail
+    assert "printed_totals absent" in detail
+
+
+def test_a_running_balance_statement_is_unaffected():
+    """A layout with a real balance column verifies itself, so nothing changes."""
+    stmt = build_statement(seed=115, opening=500000)
+    checks = check_statement(_parse(write_meezan_pdf(stmt), MEEZAN_PDF), MEEZAN_PDF)
+    assert any(c.kind == "running_balance" and c.status == "pass" for c in checks)
+    assert "nothing_verified" not in {c.kind for c in checks}
+    assert statement_usable(checks)
+
+
 def test_meezan_unsigned_columns_get_the_right_sign_from_position():
     # The core risk: a positional mistake here inverts every sign while the
     # statement still reconciles against itself.
