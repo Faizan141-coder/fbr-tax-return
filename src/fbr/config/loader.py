@@ -9,16 +9,18 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from pydantic import ValidationError
 
 from fbr import paths
-from fbr.config.schema_profile import Profile
+from fbr.config.schema_profile import MONEY_ROLES, PERIOD_ROLES, Profile
 from fbr.config.schema_registry import RegistryFile
 from fbr.config.schema_taxyear import TaxYear
 from fbr.model import Registry
+from fbr.money import AmountError, parse_paisa
 
 
 class ConfigError(RuntimeError):
@@ -93,6 +95,27 @@ def load_profiles(directory: Path | None = None) -> ProfileSet:
     return ProfileSet(tuple(profiles), tuple(report))
 
 
+def _capture_as_the_engine_does(role: str, raw: str, profile: Profile) -> int | str:
+    """Parse one captured summary value exactly as the engines' `_read_summary`.
+
+    Money goes through `parse_paisa` at the profile's own `decimals`; a period
+    value goes through the profile's own `formats.dates` list, first format that
+    fits, and comes back as an ISO string so it compares against the TOML.
+    `tests/test_loader.py` pins this against the engine's own `_read_summary`
+    for every shipped profile, so the two cannot drift.
+    """
+    if role in MONEY_ROLES:
+        return parse_paisa(raw, decimals=profile.formats.decimals)
+    if role in PERIOD_ROLES:
+        for fmt in profile.formats.dates:
+            try:
+                return datetime.strptime(raw.strip(), fmt).date().isoformat()
+            except ValueError:
+                continue
+        raise ValueError(f"date {raw!r} matches none of {profile.formats.dates}")
+    return raw.strip()
+
+
 def run_selftest(
     profile: Profile,
     parse_row: Callable[[Profile, dict], tuple],
@@ -109,6 +132,14 @@ def run_selftest(
     a literal string, say - leaves a pattern that never matches. The statement
     still parses, but a reconciliation check quietly stops running. When a
     sample is supplied, every declared pattern must match it.
+
+    `profile.selftest.summary_expect` closes the third and worst one. Matching
+    proves only that a pattern found SOMETHING; it does not prove it found the
+    right figure. A pattern aimed one line off - `opening` reading the closing
+    balance - matched happily and passed for all six shipped profiles. That is
+    a wrong number on a tax return, not a disabled check. Where a profile
+    declares the value it expects, the capture is parsed the way the engine
+    parses it and compared exactly.
     """
     for i, case in enumerate(profile.selftest.cases, start=1):
         try:
@@ -137,10 +168,39 @@ def run_selftest(
                 "the profile's own summary_sample; a pattern that never matches "
                 "silently disables a reconciliation check",
             )
+
+        expect = profile.selftest.summary_expect
+        for role in sorted(expect):
+            pattern = compiled.get(role)
+            if pattern is None:                 # pragma: no cover - the Profile
+                return ProfileStatus(           # validator rejects this at load
+                    profile.id, "", False,
+                    f"summary_expect names {role!r}, which this profile declares "
+                    "no pattern for",
+                )
+            captured = pattern.search(summary_text).group("value")
+            try:
+                got = _capture_as_the_engine_does(role, captured, profile)
+            except (AmountError, ValueError) as exc:
+                return ProfileStatus(
+                    profile.id, "", False,
+                    f"summary pattern {role} captured {captured!r} from the "
+                    f"profile's own summary_sample, which does not parse: {exc}",
+                )
+            if got != expect[role]:
+                return ProfileStatus(
+                    profile.id, "", False,
+                    f"summary pattern {role} captured {captured!r} -> {got!r} "
+                    f"from the profile's own summary_sample, but summary_expect "
+                    f"says {expect[role]!r}; the pattern matches, so nothing else "
+                    "would have noticed - it is reading the wrong figure",
+                )
+
+        checked = (f" and {len(expect)} expected capture(s)" if expect else "")
         return ProfileStatus(
             profile.id, "", True,
             f"{len(profile.selftest.cases)} selftest case(s) and "
-            f"{len(compiled)} summary pattern(s) pass",
+            f"{len(compiled)} summary pattern(s){checked} pass",
         )
 
     return ProfileStatus(

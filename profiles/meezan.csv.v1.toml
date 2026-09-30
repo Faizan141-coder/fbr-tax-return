@@ -78,6 +78,19 @@ Currency,PKR
 Statement Period,01 Jul 2025 to 23 Aug 2025
 """
 
+# What each [summary] pattern must CAPTURE out of summary_sample above: integer
+# paisa for a money role, an ISO date for a period role. summary_sample alone
+# only proves a pattern matches SOMETHING - it passed happily with `opening`
+# aimed at the closing balance. These pin WHICH figure each pattern reads,
+# which is the mistake that puts a wrong number on a return.
+[selftest.summary_expect]
+opening      = 500000        # Rs 5,000.00
+closing      = 2593559       # Rs 25,935.59
+total_credit = 4351393       # Rs 43,513.93
+total_debit  = 2257834       # Rs 22,578.34
+period_from  = "2025-07-01"
+period_to    = "2025-08-23"
+
 [[selftest.cases]]
 row = { "Booking Date" = "01 Jul 2025", "Value Date" = "01 Jul 2025", "Doc No" = "D00001", "Description" = "Top-up", "Debit" = "", "Credit" = "1,000.00", "Available Balance" = "1,000.00" }
 expect_date   = 2025-07-01

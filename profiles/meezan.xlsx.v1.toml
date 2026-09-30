@@ -59,6 +59,17 @@ Closing Balance,PKR25,935.59
 From Date,2025-07-01 00:00:00,To Date,2026-06-30 00:00:00
 """
 
+# What each [summary] pattern must CAPTURE out of summary_sample above: integer
+# paisa for a money role, an ISO date for a period role. summary_sample alone
+# only proves a pattern matches SOMETHING - it passed happily with `opening`
+# aimed at the closing balance. These pin WHICH figure each pattern reads,
+# which is the mistake that puts a wrong number on a return.
+[selftest.summary_expect]
+opening     = 500000         # Rs 5,000.00
+closing     = 2593559        # Rs 25,935.59
+period_from = "2025-07-01"
+period_to   = "2026-06-30"
+
 [[selftest.cases]]
 row = { "Booking Date" = "2025-07-01 10:00:00", "Description" = "IBFT Credit", "Credit" = "+ PKR5,000.00", "Debit" = "", "Available Balance" = "PKR15,000.00" }
 expect_date   = 2025-07-01

@@ -157,8 +157,20 @@ def test_a_synthetic_profile_marks_every_decisive_setting(name):
     # entry - must be marked on EVERY line: ORing let the align marker rescue
     # an unmarked amount column, which is the setting that decides the figure.
     marked: dict[str, bool] = {}
+    section = ""
     for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped.strip("[]")
+            continue
         if line.lstrip().startswith("#") or "=" not in line:
+            continue
+        # [selftest] and its sub-tables are the profile's own sample data, not
+        # claims about the real bank: summary_expect pins what a pattern reads
+        # out of summary_sample, so it is self-consistent by construction and a
+        # real dump has nothing to confirm about it. Only settings that describe
+        # the BANK need a marker.
+        if section.startswith("selftest"):
             continue
         key = line.split("=", 1)[0].strip()
         marked[key] = marked.get(key, True) and "VERIFY" in line

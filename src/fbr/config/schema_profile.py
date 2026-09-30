@@ -162,6 +162,11 @@ class SelfTestCase(BaseModel):
     expect_amount: int          # signed paisa
 
 
+MONEY_ROLES = frozenset({"opening", "closing", "total_credit", "total_debit"})
+PERIOD_ROLES = frozenset({"period_from", "period_to"})
+TEXT_ROLES = frozenset({"account_id"})
+
+
 class SelfTest(BaseModel):
     model_config = _STRICT
     cases: list[SelfTestCase]
@@ -171,6 +176,18 @@ class SelfTest(BaseModel):
     # shipped Meezan XLSX profile spent a release with four dead patterns
     # and a disabled opening/closing check.
     summary_sample: str = ""
+    # Role -> the value its pattern must CAPTURE out of `summary_sample`:
+    # integer paisa for a money role, an ISO date string for a period role, the
+    # exact text for account_id. `summary_sample` on its own only proves a
+    # pattern matches SOMETHING, and run_selftest tested nothing but
+    # `search()` truthiness - so a pattern that matched the WRONG line's number
+    # passed for all six shipped profiles. Swapping `opening` and `closing`
+    # made `opening` read Rs 25,935.59 instead of Rs 5,000.00 and the selftest
+    # still said ok. "Pattern never matches" is caught by summary_sample;
+    # "pattern captures the wrong figure" is the one that puts a wrong number
+    # on a return, and this is what catches it. Optional, so a profile without
+    # it still loads.
+    summary_expect: dict[str, int | str | date] = Field(default_factory=dict)
 
     @field_validator("cases")
     @classmethod
@@ -178,6 +195,61 @@ class SelfTest(BaseModel):
         if not v:
             raise ValueError("a profile must carry at least one selftest case")
         return v
+
+    @field_validator("summary_expect", mode="before")
+    @classmethod
+    def _expectations_are_well_typed(cls, v: object) -> object:
+        # mode="before" on purpose. Validated after coercion, pydantic had
+        # already turned the float 5000.0 into the int 5000 - an accepted
+        # expectation of Rs 50.00 where Rs 5,000.00 was meant - and the
+        # isinstance check below could not see it had ever been a float.
+        if not isinstance(v, dict):
+            return v
+        known = MONEY_ROLES | PERIOD_ROLES | TEXT_ROLES
+        out: dict[str, int | str] = {}
+        for role, expected in v.items():
+            if role not in known:
+                raise ValueError(
+                    f"summary_expect role {role!r} is not a summary pattern; "
+                    f"known roles are {sorted(known)}"
+                )
+            if role in MONEY_ROLES:
+                # Money is integer paisa everywhere in this codebase. A float
+                # or a "5,000.00" string here would compare unequal to the
+                # engine's int forever, or worse, coerce and lose a paisa.
+                if isinstance(expected, bool) or not isinstance(expected, int):
+                    raise ValueError(
+                        f"summary_expect.{role} = {expected!r} must be integer "
+                        "paisa (Rs 5,000.00 is 500000), never a float, a string "
+                        "or a date"
+                    )
+                out[role] = expected
+            elif role in PERIOD_ROLES:
+                # A bare TOML date (period_from = 2025-07-01) parses to a
+                # datetime.date; accept it and normalise, rather than failing
+                # on a spelling that reads perfectly well in the file.
+                if isinstance(expected, date):
+                    out[role] = expected.isoformat()
+                    continue
+                if not isinstance(expected, str):
+                    raise ValueError(
+                        f"summary_expect.{role} = {expected!r} must be an ISO "
+                        "date string (YYYY-MM-DD)"
+                    )
+                try:
+                    out[role] = date.fromisoformat(expected).isoformat()
+                except ValueError:
+                    raise ValueError(
+                        f"summary_expect.{role} = {expected!r} is not an ISO "
+                        "date (YYYY-MM-DD)"
+                    ) from None
+            else:
+                if not isinstance(expected, str):
+                    raise ValueError(
+                        f"summary_expect.{role} = {expected!r} must be a string"
+                    )
+                out[role] = expected
+        return out
 
 
 class Profile(BaseModel):
@@ -211,4 +283,24 @@ class Profile(BaseModel):
                 raise ValueError(f"sign={mode!r} must not define debit/credit columns")
         if mode == "suffix" and not (self.formats.debit_tokens and self.formats.credit_tokens):
             raise ValueError("sign='suffix' needs debit_tokens and credit_tokens")
+        return self
+
+    @model_validator(mode="after")
+    def _expectations_point_at_declared_patterns(self) -> "Profile":
+        expect = self.selftest.summary_expect
+        if not expect:
+            return self
+        declared = set(self.summary.compiled())
+        unknown = sorted(set(expect) - declared)
+        if unknown:
+            raise ValueError(
+                f"selftest.summary_expect names {unknown}, which this profile "
+                "declares no [summary] pattern for; an expectation on a pattern "
+                "that does not exist would silently never run"
+            )
+        if not self.selftest.summary_sample:
+            raise ValueError(
+                "selftest.summary_expect needs a selftest.summary_sample to "
+                "check the captured values against"
+            )
         return self

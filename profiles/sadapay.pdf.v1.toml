@@ -60,6 +60,17 @@ Total credit  1,000.00
 Statement Period  01 Jul, 2025 to 30 Jun, 2026
 """
 
+# What each [summary] pattern must CAPTURE out of summary_sample above: integer
+# paisa for a money role, an ISO date for a period role. summary_sample alone
+# only proves a pattern matches SOMETHING - it passed happily with `opening`
+# aimed at the closing balance. These pin WHICH figure each pattern reads,
+# which is the mistake that puts a wrong number on a return.
+[selftest.summary_expect]
+total_credit = 100000        # Rs 1,000.00
+total_debit  = 250000        # Rs 2,500.00
+period_from  = "2025-07-01"
+period_to    = "2026-06-30"
+
 [[selftest.cases]]
 row = { "Date" = "01 Jul, 2025", "Description" = "TRANSF CR/ICT/ Top-up", "Debit/Credit" = "+1,000.00" }
 expect_date   = 2025-07-01

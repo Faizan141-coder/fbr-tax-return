@@ -167,3 +167,209 @@ def test_unknown_tax_year_lists_what_is_available(tmp_path):
     _write(tmp_path, "TY2026.toml", TAXYEAR_TOML)
     with pytest.raises(ConfigError, match="TY2026"):
         load_tax_year("TY2030", tmp_path)
+
+
+# --------------------------------------------------------------------------
+# selftest.summary_expect: a summary pattern must capture the RIGHT figure.
+#
+# run_selftest used to test `pattern.search()` truthiness only, so a pattern
+# aimed one line off matched happily and passed. All six shipped profiles
+# accepted `opening` reading the closing balance - Rs 25,935.59 in place of
+# Rs 5,000.00, a Rs 20,935.59 error - with ok=True. "Never matches" was caught;
+# "captures the wrong figure" is the one that puts a wrong number on a return.
+# --------------------------------------------------------------------------
+
+EXPECT_TOML = """
+id          = "expect.csv.v1"
+institution = "Test Bank"
+container   = "csv"
+valid_from  = 2025-07-01
+
+[detect]
+header_contains = ["Date"]
+
+[columns]
+date        = "Date"
+description = "Description"
+amount      = "Amount"
+
+[formats]
+dates = ["%d %b %Y"]
+sign  = "signed"
+
+[summary]
+opening     = '(?i)Opening\\s+Balance[^\\d\\n]+?(?P<value>-?[\\d,]+\\.\\d{2})'
+closing     = '(?i)Closing\\s+Balance[^\\d\\n]+?(?P<value>-?[\\d,]+\\.\\d{2})'
+period_from = '(?i)Statement\\s+Period[^\\d\\n]+?(?P<value>\\d{2} \\w{3} \\d{4})'
+
+[[selftest.cases]]
+row = { "Date" = "01 Jul 2025", "Description" = "Top-up", "Amount" = "+1,000.00" }
+expect_date   = 2025-07-01
+expect_amount = 100000
+
+[selftest]
+summary_sample = '''
+Opening Balance,5,000.00
+Closing Balance,25,935.59
+Statement Period,01 Jul 2025 to 23 Aug 2025
+'''
+
+[selftest.summary_expect]
+opening     = 500000
+closing     = 2593559
+period_from = "2025-07-01"
+"""
+
+
+def _expect_profile(**overrides):
+    """Load EXPECT_TOML, optionally replacing whole lines by key = value text."""
+    import tomllib
+
+    from fbr.config.schema_profile import Profile
+
+    data = tomllib.loads(EXPECT_TOML)
+    for dotted, value in overrides.items():
+        target = data
+        *path, leaf = dotted.split("__")
+        for step in path:
+            target = target[step]
+        if value is _DELETE:
+            target.pop(leaf, None)
+        else:
+            target[leaf] = value
+    return Profile.model_validate(data)
+
+
+_DELETE = object()
+
+
+def _selftest(profile):
+    from fbr.config.loader import run_selftest
+    from fbr.engines.tabular import parse_row
+
+    return run_selftest(profile, parse_row,
+                        summary_text=profile.selftest.summary_sample)
+
+
+def test_the_shipped_expectations_pass():
+    status = _selftest(_expect_profile())
+    assert status.ok, status.message
+    assert "expected capture(s)" in status.message
+
+
+def test_a_pattern_that_captures_the_wrong_money_fails_the_selftest():
+    # `opening` aimed at the Closing Balance line. It still MATCHES, so the
+    # dead-pattern check is happy; only the expected value catches it.
+    profile = _expect_profile(
+        summary__opening=r'(?i)Closing\s+Balance[^\d\n]+?(?P<value>-?[\d,]+\.\d{2})'
+    )
+    status = _selftest(profile)
+    assert not status.ok
+    assert "opening" in status.message
+    assert "25,935.59" in status.message      # what it wrongly read
+    assert "500000" in status.message         # what it must read, in paisa
+
+
+def test_a_pattern_that_captures_the_wrong_date_fails_the_selftest():
+    profile = _expect_profile(
+        selftest__summary_expect__period_from="2025-08-23"   # the period END
+    )
+    status = _selftest(profile)
+    assert not status.ok
+    assert "period_from" in status.message
+    assert "2025-07-01" in status.message
+
+
+def test_expectations_are_compared_as_integer_paisa_not_text():
+    # Exact integer comparison, no tolerance: one paisa out must fail.
+    status = _selftest(_expect_profile(selftest__summary_expect__opening=500001))
+    assert not status.ok
+    assert "500001" in status.message
+
+
+def test_money_expectations_must_be_integer_paisa():
+    from pydantic import ValidationError
+
+    for bad in ("5,000.00", 5000.0, "500000"):
+        with pytest.raises(ValidationError) as exc:
+            _expect_profile(selftest__summary_expect__opening=bad)
+        assert "integer" in str(exc.value)
+
+
+def test_a_period_expectation_must_be_an_iso_date():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        _expect_profile(selftest__summary_expect__period_from="01 Jul 2025")
+    assert "ISO date" in str(exc.value)
+
+
+def test_an_expectation_for_an_undeclared_pattern_is_rejected_at_load():
+    # An expectation on a pattern the profile does not declare would never run.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        _expect_profile(selftest__summary_expect__total_credit=1)
+    assert "declares no [summary] pattern" in str(exc.value)
+
+
+def test_an_unknown_expectation_role_is_rejected_at_load():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as exc:
+        _expect_profile(selftest__summary_expect__opening_balance=1)
+    assert "not a summary pattern" in str(exc.value)
+
+
+def test_summary_expect_is_optional():
+    # A profile without it must still load and still pass, so the mechanism
+    # cannot break a profile that predates it.
+    status = _selftest(_expect_profile(selftest__summary_expect=_DELETE))
+    assert status.ok, status.message
+    assert "expected capture" not in status.message
+
+
+def test_every_shipped_profile_pins_every_summary_pattern_it_declares():
+    """A declared pattern with no expectation is a figure nothing checks."""
+    root = Path(__file__).resolve().parents[1]
+    for profile in load_profiles(root / "profiles").profiles:
+        declared = set(profile.summary.compiled())
+        pinned = set(profile.selftest.summary_expect)
+        assert declared == pinned, (
+            f"{profile.id}: [summary] declares {sorted(declared)} but "
+            f"summary_expect pins {sorted(pinned)}; an unpinned pattern can "
+            "capture the wrong figure and still pass"
+        )
+
+
+def test_the_loader_parses_a_capture_exactly_as_the_engine_does():
+    """Pin the loader's capture parsing to the engine's own `_read_summary`.
+
+    run_selftest cannot import the engine (the engine is injected as
+    `parse_row`), so it re-implements the two conversions. If they ever drift,
+    the selftest would bless a value the engine reads differently - the exact
+    class of bug summary_expect exists to stop.
+    """
+    from fbr.config.loader import _capture_as_the_engine_does
+    from fbr.engines.tabular import _read_summary
+
+    root = Path(__file__).resolve().parents[1]
+    checked = 0
+    for profile in load_profiles(root / "profiles").profiles:
+        sample = profile.selftest.summary_sample
+        engine = _read_summary(sample, profile)
+        engine_field = {"opening": "opening", "closing": "closing",
+                        "total_credit": "total_credit", "total_debit": "total_debit",
+                        "period_from": "period_start", "period_to": "period_end",
+                        "account_id": "account_identifier"}
+        for role, pattern in profile.summary.compiled().items():
+            captured = pattern.search(sample).group("value")
+            mine = _capture_as_the_engine_does(role, captured, profile)
+            theirs = getattr(engine, engine_field[role])
+            if role in ("period_from", "period_to"):
+                theirs = theirs.isoformat()
+            assert mine == theirs, (
+                f"{profile.id}.{role}: loader read {mine!r}, engine read {theirs!r}"
+            )
+            checked += 1
+    assert checked == 30, checked      # 6 profiles, 30 declared patterns
